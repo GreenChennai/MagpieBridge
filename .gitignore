@@ -1,0 +1,26 @@
+# --- Python ---
+__pycache__/
+*.pyc
+.venv*/
+*.egg-info/
+
+# --- 构建产物 ---
+build/
+dist/
+
+# --- 运行时数据（程序自管，不入库）---
+logs/
+data/
+models/
+plugins/config/
+plugins/leads_forwarder/__pycache__/
+
+# --- 前端 ---
+web/node_modules/
+
+# --- 本机配置（含机器相关坐标/凭据；模板见 config.example.json）---
+config.json
+
+# --- 杂项 ---
+*.log
+.DS_Store

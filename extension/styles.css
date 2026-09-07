@@ -1,0 +1,90 @@
+/* LeadsLinker 内容脚本样式 */
+
+.leadslinker-notification {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 15px 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+  z-index: 10000;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  max-width: 300px;
+  animation: leadslinker-slideIn 0.3s ease-out;
+}
+
+@keyframes leadslinker-slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.leadslinker-lead-highlight {
+  background: rgba(102, 126, 234, 0.2) !important;
+  border: 2px solid #667eea !important;
+  border-radius: 4px !important;
+  position: relative !important;
+}
+
+.leadslinker-lead-highlight::after {
+  content: '线索';
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  background: #667eea;
+  color: white;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.leadslinker-loading {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top-color: white;
+  animation: leadslinker-spin 1s ease-in-out infinite;
+}
+
+@keyframes leadslinker-spin {
+  to { transform: rotate(360deg); }
+}
+
+.leadslinker-status-indicator {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: white;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  z-index: 9999;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.leadslinker-status-indicator:hover { transform: scale(1.1); }
+.leadslinker-status-indicator.active { background: #4CAF50; }
+.leadslinker-status-indicator.inactive { background: #f44336; }
+
+.leadslinker-status-indicator .dot {
+  width: 12px;
+  height: 12px;
+  background: white;
+  border-radius: 50%;
+  animation: leadslinker-pulse 2s infinite;
+}
+
+@keyframes leadslinker-pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
+}

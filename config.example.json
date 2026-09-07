@@ -1,0 +1,80 @@
+{
+  "onebot": {
+    "http_host": "127.0.0.1",
+    "http_port": 3000,
+    "ws_host": "127.0.0.1",
+    "ws_port": 3001,
+    "access_token": ""
+  },
+  "human_sim": {
+    "min_delay_ms": 200,
+    "max_delay_ms": 1500,
+    "keystroke_delay_ms": 50,
+    "tremor_amplitude_px": 2.0,
+    "bezier_steps": 20,
+    "click_radius_px": 12,
+    "move_short_ms": 200,
+    "move_long_ms": 800,
+    "hover_pause_ms": 150,
+    "think_delay_ms": 1200,
+    "think_delay_std_ms": 500
+  },
+  "wechat": {
+    "window_position_x": 0,
+    "window_position_y": 0,
+    "window_width": 900,
+    "window_height": 600,
+    "adapter_version": "4.1.13",
+    "chat_list_x1": 70,
+    "chat_list_y1": 70,
+    "chat_list_x2": 335,
+    "chat_list_y2": 580,
+    "input_box_x": 580,
+    "input_box_y": 515,
+    "send_button_x": 835,
+    "send_button_y": 545
+  },
+  "web": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "admin": {
+    "enabled": false,
+    "admin_contacts": [],
+    "check_interval_sec": 5,
+    "command_prefix": ""
+  },
+  "monitor": {
+    "enabled": false,
+    "monitor_all": true,
+    "poll_interval_sec": 3,
+    "poll_interval_std_sec": 1,
+    "scroll_pages": 3,
+    "react_delay_ms": 1200,
+    "chat_x1": 350,
+    "chat_y1": 60,
+    "chat_x2": 885,
+    "chat_y2": 545,
+    "listen_contacts": [],
+    "continuous_monitor": true,
+    "continuous_check_interval": 2.0,
+    "activity_decay": 0.85,
+    "activity_boost": 3.0,
+    "browser_focus_sec": 3,
+    "idle_browse_pages_min": 1,
+    "idle_browse_pages_max": 2,
+    "browser_scroll": true,
+    "browser_scroll_interval_sec": 6,
+    "browser_refresh_min_sec": 1800,
+    "browser_refresh_max_sec": 3600,
+    "browse_pause_hotkey": "ctrl+alt+s",
+    "browser_urls": [
+      "https://www.baidu.com",
+      "https://news.qq.com",
+      "https://github.com/trending",
+      "https://www.bilibili.com"
+    ]
+  },
+  "log_level": "INFO",
+  "log_file": "logs/magpie.log"
+}

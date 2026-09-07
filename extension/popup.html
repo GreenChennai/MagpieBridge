@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LeadsLinker - 线索转发</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 400px;
+      min-height: 500px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 20px;
+      text-align: center;
+    }
+
+    .header h1 { font-size: 18px; margin-bottom: 5px; }
+    .header p { font-size: 12px; opacity: 0.9; }
+
+    .tabs {
+      display: flex;
+      background: white;
+      border-bottom: 1px solid #eee;
+    }
+
+    .tab {
+      flex: 1;
+      padding: 12px;
+      text-align: center;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.3s;
+    }
+
+    .tab.active { border-bottom-color: #667eea; color: #667eea; }
+    .tab:hover { background: #f9f9f9; }
+
+    .content { padding: 15px; }
+
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    .leads-list { max-height: 300px; overflow-y: auto; }
+
+    .lead-item {
+      background: white;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .lead-item .time { font-size: 11px; color: #999; margin-bottom: 8px; }
+    .lead-item .info { font-size: 13px; line-height: 1.5; }
+    .lead-item .info span { display: block; margin-bottom: 3px; }
+    .lead-item .info .label { color: #666; font-weight: 500; }
+
+    .config-section {
+      background: white;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 15px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .config-section h3 { font-size: 14px; margin-bottom: 12px; color: #333; }
+
+    .form-group { margin-bottom: 12px; }
+    .form-group label { display: block; font-size: 12px; color: #666; margin-bottom: 5px; }
+
+    .form-group input,
+    .form-group textarea {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+
+    .form-group textarea { min-height: 80px; resize: vertical; }
+
+    .btn {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      width: 100%;
+    }
+
+    .btn:hover { background: #5a6fd6; }
+    .btn-secondary { background: #f0f0f0; color: #333; }
+    .btn-secondary:hover { background: #e0e0e0; }
+
+    .status-bar {
+      background: #e8f5e9;
+      padding: 10px;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      font-size: 12px;
+      color: #2e7d32;
+    }
+
+    .empty-state { text-align: center; padding: 40px 20px; color: #999; }
+    .empty-state i { font-size: 48px; margin-bottom: 15px; display: block; }
+
+    .queue-status {
+      background: #fff3e0;
+      padding: 10px;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      font-size: 12px;
+      color: #e65100;
+    }
+
+    .switch-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px;
+      background: white;
+      border-radius: 8px;
+      margin-bottom: 15px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .switch-label { font-size: 13px; color: #333; }
+    .switch-description { font-size: 11px; color: #999; margin-top: 3px; }
+
+    .switch { position: relative; width: 50px; height: 26px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #ccc;
+      transition: .4s;
+      border-radius: 26px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 20px; width: 20px;
+      left: 3px; bottom: 3px;
+      background-color: white;
+      transition: .4s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider { background-color: #667eea; }
+    input:checked + .slider:before { transform: translateX(24px); }
+
+    .test-server-status {
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      margin-left: 10px;
+    }
+
+    .test-server-status.online { background: #e8f5e9; color: #2e7d32; }
+    .test-server-status.offline { background: #ffebee; color: #c62828; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>LeadsLinker</h1>
+    <p>抖音来客线索检测 & OneBot转发</p>
+    <div style="margin-top: 10px; font-size: 12px;">
+      <span>当前账号: </span>
+      <span id="currentAccount" style="font-weight: bold;">检测中...</span>
+      <select id="accountSelect" style="margin-left: 10px; padding: 2px 5px; border-radius: 4px; border: none; font-size: 11px;">
+        <option value="">切换账号</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="leads">线索列表</div>
+    <div class="tab" data-tab="config">配置</div>
+    <div class="tab" data-tab="test">测试</div>
+    <div class="tab" data-tab="debug">调试</div>
+  </div>
+
+  <div class="content">
+    <!-- 线索列表 -->
+    <div class="tab-content active" id="leads">
+      <div class="status-bar">
+        <span>检测状态: </span>
+        <span id="detectionStatus">运行中</span>
+      </div>
+
+      <div class="queue-status" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>
+          <span>待转发: </span>
+          <span id="queueCount">0</span>
+          <span> 条线索</span>
+          <span id="queueState" style="color:#888;margin-left:6px;"></span>
+        </span>
+        <span style="display:flex;gap:6px;">
+          <button id="retryQueueBtn" style="background:none;border:1px solid #1976d2;color:#1976d2;cursor:pointer;font-size:12px;font-weight:600;padding:2px 6px;border-radius:4px;">立即重试</button>
+          <button id="clearQueueBtn" style="background:none;border:none;color:#c62828;cursor:pointer;font-size:12px;font-weight:600;padding:2px 6px;">清空待转发</button>
+        </span>
+      </div>
+      <div id="queueHint" style="display:none;background:#fff8e1;color:#8d6e00;padding:8px 10px;border-radius:4px;margin-bottom:12px;font-size:12px;line-height:1.5;"></div>
+
+      <div id="forwardErrorBar" style="display:none;background:#ffebee;color:#c62828;padding:10px;border-radius:4px;margin-bottom:15px;font-size:12px;line-height:1.5;">
+        <div style="font-weight:bold;margin-bottom:4px;">⚠ 转发到 OneBot 失败</div>
+        <div id="forwardErrorText"></div>
+      </div>
+
+      <div class="leads-list" id="leadsList">
+        <div class="empty-state">
+          <i>📋</i>
+          <p>暂无检测到的线索</p>
+          <p>请访问 life.douyin.com 开始检测</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 配置 -->
+    <div class="tab-content" id="config">
+      <div class="config-section">
+        <h3>OneBot 连接配置</h3>
+        <div class="form-group">
+          <label>OneBot 插件地址</label>
+          <input type="text" id="onebotUrl" value="http://127.0.0.1:3000" placeholder="http://127.0.0.1:3000">
+          <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
+            <button class="btn-secondary" style="width:auto;padding:5px 12px;font-size:12px" id="checkOnebotBtn">检测连接</button>
+            <span id="onebotStatus" class="test-server-status">未检测</span>
+          </div>
+        </div>
+        <button class="btn" id="saveOnebotBtn">保存连接配置</button>
+      </div>
+
+      <div class="switch-container">
+        <div>
+          <div class="switch-label">系统通知</div>
+          <div class="switch-description">新线索时发送Windows系统通知</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="systemNotificationToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="switch-container">
+        <div>
+          <div class="switch-label">保持网站活跃</div>
+          <div class="switch-description">防止浏览器杀掉网站进程</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="keepAliveToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="switch-container">
+        <div>
+          <div class="switch-label">自动刷新</div>
+          <div class="switch-description">定时刷新页面防止过期</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="autoRefreshToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="config-section" id="autoRefreshConfig" style="display: none;">
+        <h3>自动刷新设置</h3>
+        <div class="form-group">
+          <label>刷新间隔 (分钟)</label>
+          <input type="number" id="autoRefreshInterval" value="10" min="1" max="60">
+        </div>
+        <button class="btn" id="saveAutoRefreshBtn">保存刷新设置</button>
+      </div>
+
+      <div class="switch-container" style="border:1px solid #e6a23c;background:#fffdf5;">
+        <div>
+          <div class="switch-label">⚡ 强劲模式</div>
+          <div class="switch-description">挂机全速检测：来客页保持前台+防息屏、扫描提速到亚秒级、周期自动刷新、只保留一个来客页。全程不模拟鼠标/键盘/剪贴板（仅页面内 DOM 操作），建议人离开电脑时开启</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="turboToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="config-section" id="turboConfig" style="display: none;">
+        <h3>强劲模式设置</h3>
+        <div class="form-group">
+          <label>页面自动刷新间隔 (秒)</label>
+          <input type="number" id="turboRefreshSec" value="90" min="60" max="600">
+        </div>
+        <div class="switch-container" style="padding:8px 0;">
+          <div>
+            <div class="switch-label" style="font-size:13px;">保持前台 + 防息屏</div>
+            <div class="switch-description">周期激活来客标签页并申请屏幕唤醒锁（会抢占窗口焦点）</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="turboForeground" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="switch-container" style="padding:8px 0;">
+          <div>
+            <div class="switch-label" style="font-size:13px;">单页面模式</div>
+            <div class="switch-description">自动关闭多余的抖音来客标签页，只保留一个会话页</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="turboSingleTab" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+        <button class="btn" id="saveTurboBtn">保存强劲模式设置</button>
+      </div>
+    </div>
+
+    <!-- 测试 -->
+    <div class="tab-content" id="test">
+      <div class="config-section">
+        <h3>模拟线索数据</h3>
+        <div class="form-group">
+          <label>姓名</label>
+          <input type="text" id="testName" value="测试客户" placeholder="姓名">
+        </div>
+        <div class="form-group">
+          <label>电话</label>
+          <input type="text" id="testPhone" value="13800138000" placeholder="手机号">
+        </div>
+        <div class="form-group">
+          <label>微信号</label>
+          <input type="text" id="testWechat" value="test_wechat" placeholder="微信号">
+        </div>
+        <div class="form-group">
+          <label>备注</label>
+          <input type="text" id="testNote" value="测试备注信息" placeholder="备注">
+        </div>
+        <div class="form-group">
+          <label>线索类型</label>
+          <select id="testType" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+            <option value="已留资">已留资</option>
+            <option value="广告源">广告源</option>
+            <option value="经营源">经营源</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>发送数量 (批量)</label>
+          <input type="number" id="testCount" value="1" min="1" max="50" placeholder="发送条数">
+        </div>
+        <div class="form-group">
+          <label>延时 (秒) — 先点「延时推送」，再立刻去软件点「开始挂起」</label>
+          <input type="number" id="testDelaySec" value="10" min="1" max="300" placeholder="延时秒数">
+        </div>
+        <button class="btn" id="testSendBtn">发送测试线索</button>
+        <button class="btn" id="testDelaySendBtn" style="margin-top:10px;background:#9e6a03;">⏱ 延时推送测试消息</button>
+        <div id="testResult" style="margin-top:10px;font-size:12px;color:#666;display:none;"></div>
+      </div>
+    </div>
+
+    <!-- 调试通道 (AI 远程分析) -->
+    <div class="tab-content" id="debug">
+      <div class="config-section">
+        <h3>调试通道（AI 页面分析）</h3>
+        <p style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.5;">
+          开启后，扩展会向 OneBot(3000) 上报抖音来客页面信息；AI 通过 <code>POST /debug_query</code> 抓取真实 DOM 用于重设计插件。
+        </p>
+        <div class="switch-container" style="margin-bottom:12px;">
+          <div>
+            <div class="switch-label">调试通道开关</div>
+            <div class="switch-description">默认开；生产测试完可关闭</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="debugToggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div id="debugStatusLine" style="font-size:12px;color:#666;margin-bottom:10px;line-height:1.6;">未检测</div>
+        <div class="form-group">
+          <label>选择器 / 文本 / JS</label>
+          <input type="text" id="debugInput" placeholder="例如: .byted-tab-item 或 已留资 或 JS代码(勾选下方)">
+          <label style="margin-top:6px;display:flex;align-items:center;gap:6px;font-size:12px;">
+            <input type="checkbox" id="debugIsJs" style="width:auto;"> 输入为 JS 代码（eval）
+          </label>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+          <button class="btn-secondary" id="debugSnapshotBtn" style="width:auto;padding:5px 10px;font-size:12px;">抓快照</button>
+          <button class="btn-secondary" id="debugTestBtn" style="width:auto;padding:5px 10px;font-size:12px;">测选择器</button>
+          <button class="btn-secondary" id="debugFindBtn" style="width:auto;padding:5px 10px;font-size:12px;">按文本查</button>
+          <button class="btn-secondary" id="debugHtmlBtn" style="width:auto;padding:5px 10px;font-size:12px;">抓HTML</button>
+          <button class="btn-secondary" id="debugEvalBtn" style="width:auto;padding:5px 10px;font-size:12px;">执行JS</button>
+        </div>
+        <pre id="debugOutput" style="margin-top:10px;background:#0f172a;color:#7dd3fc;padding:10px;border-radius:6px;font-size:11px;max-height:300px;overflow:auto;white-space:pre-wrap;word-break:break-all;"></pre>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+
+  <!-- 全局 toast 提示（调试面板等复用） -->
+  <div id="diagToast" style="display:none;position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:8px 16px;border-radius:6px;font-size:12px;z-index:2000;"></div>
+</body>
+</html>
