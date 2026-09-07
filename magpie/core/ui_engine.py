@@ -172,6 +172,11 @@ class UIEngine:
         Without this guard, a tray-hidden WeChat makes every synthetic
         click/keystroke land on the user's currently focused window while the
         OCR content checks spin in retry loops until the job times out.
+
+        v5.0 分层自愈（ADR-0006）：发送前会话保活 → 置前；置前仍失败（会话正
+        处于断开/无前台态）→ 强制挂回控制台自愈 + 复位微信窗口位置 +
+        **仅重试一次**。此刻消息尚未进入输入框，重试不构成重复发送；
+        `uncertain` 绝不重试的纪律不受影响。
         """
         from ..tui import bus
         bus.wait_yield_release()   # 延时操作：让出控制权期间不抢前台
@@ -185,11 +190,32 @@ class UIEngine:
                 return False
         except Exception:
             pass
-        if not self.window.restore_and_focus():
-            logger.error("微信窗口不可见/无法置前（可能被隐藏到托盘），放弃本次发送；"
-                         "请在托盘恢复微信主界面后重试")
-            return False
-        return True
+        if self.window.restore_and_focus():
+            return True
+
+        # 置前失败：会话大概率正处在断开/无前台态 → 立即强制自愈（不等巡检）
+        logger.warning("微信置前失败：强制执行会话自愈（挂回本机控制台）后重试一次")
+        try:
+            from .session_control import ensure_session_active
+            _ok, _msg = ensure_session_active(force=True)
+            logger.info("强制会话自愈：%s", _msg)
+        except Exception:
+            logger.exception("强制会话自愈异常")
+        time.sleep(1.5)  # 挂回控制台后桌面/微信需要时间重新渲染
+        # 显示拓扑可能已变（RDP 分辨率 → 物理屏分辨率），复位微信窗口位置
+        try:
+            wc = self.config.wechat
+            self.window.set_position(
+                wc.window_position_x, wc.window_position_y, wc.window_width, wc.window_height
+            )
+        except Exception:
+            pass
+        if self.window.restore_and_focus():
+            logger.info("会话自愈后微信置前成功，继续本次发送")
+            return True
+        logger.error("微信窗口不可见/无法置前（自愈重试后仍失败，可能被隐藏到托盘），"
+                     "放弃本次发送；请在托盘恢复微信主界面后重试")
+        return False
 
     async def send_image_file(self, contact: str, file_path: str) -> bool:
         """Send an image file to a contact or group (serialized via the queue)."""

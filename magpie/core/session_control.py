@@ -214,38 +214,114 @@ def _input_desktop_accessible() -> bool:
         return False
 
 
+def _get_foreground() -> int:
+    """当前前台窗口句柄（0 = 整个桌面没有前台窗口）。"""
+    try:
+        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
+def probe_desktop() -> dict:
+    """一次桌面可交互性探针：会话状态 / 输入桌面 / 前台窗口。
+
+    供巡检循环与单元测试使用；三个信号合起来才能区分「断开」
+    （state=4）、「锁屏」（桌面打不开）与「无前台」（Active 但
+    foreground=0，RDP 最小化/过渡态）这三种失败模式。
+    """
+    return {
+        "session_state": _session_state(),
+        "input_desktop": _input_desktop_accessible(),
+        "foreground": _get_foreground(),
+    }
+
+
+# 「无前台」宽限期（秒）：RDP 窗口最小化等过渡态可能短暂 foreground=0，
+# 宽限期内绝不挂控制台——防止把正在使用的用户踢下线。超过宽限期仍在
+# 无前台态，说明人已经不在看远程桌面，可以挂回物理控制台自愈。
+NULL_FG_GRACE_SEC = 90.0
+_null_fg_since: float = 0.0
+
+
+def should_hang(
+    session_state: "int | None",
+    input_desktop_ok: bool,
+    foreground: int,
+    null_fg_since: float,
+    now: float,
+    grace: float = NULL_FG_GRACE_SEC,
+) -> tuple[bool, str]:
+    """判定是否应该挂回本机控制台（纯函数，可单测）。
+
+    触发条件（满足其一）：
+    1. 会话已断开（WTSDisconnected，典型 = 用户关闭了 RDP 客户端）；
+    2. 输入桌面不可访问（锁屏/安全桌面）；
+    3. 桌面无前台窗口**且持续超过宽限期**（RDP 最小化/过渡态，人已不看）。
+
+    短暂的 foreground=0（< grace）绝不触发——绝把正在使用的用户踢下线。
+    返回 (是否挂回, 原因说明)。
+    """
+    if session_state == WTS_DISCONNECTED:
+        return True, "会话已断开（远程桌面已关闭）"
+    if not input_desktop_ok:
+        return True, "输入桌面不可访问（疑似锁屏）"
+    if not foreground:
+        waited = now - null_fg_since if null_fg_since else 0.0
+        if null_fg_since and waited >= grace:
+            return True, f"桌面无前台窗口持续 {waited:.0f}s（远程桌面最小化/过渡态），人已不在看"
+        return False, "桌面无前台窗口（宽限观察期内）"
+    return False, "会话可交互"
+
+
 def ensure_session_active(force: bool = False) -> tuple[bool, str]:
-    """自动保持桌面会话可交互（自动版「开始挂起」）。
+    """自动保持桌面会话可交互（自动版「开始挂起」，v5.0 三信号探针版）。
 
     7×24 跑机场景：用远程桌面登录并关闭客户端后，会话进入 WTSDisconnected
     或被锁屏，桌面不再是输入目标，每次注入的点击/按键都被吞掉 —— 这就是
     「关闭远程桌面后无法发送、打开前台就能发」的根因。此函数：
 
     1. 始终应用防锁屏配置（关屏保/待机/关屏/机器不活动锁定）；
-    2. **仅在会话已断开（手动关闭远程桌面）或输入桌面不可访问（锁屏）时**，
-       执行 `tscon <sid> /dest:console` 把会话挂回本机控制台，让合成输入恢复。
+    2. 探针三个信号（会话状态 / 输入桌面 / 前台窗口），命中
+       :func:`should_hang` 的任一触发条件才执行 `tscon <sid> /dest:console`
+       把会话挂回本机控制台，让合成输入恢复。
 
-    ⚠️ 关键：**绝不在会话仍处于「连接/活跃」状态时挂起**。之前的实现用
-    `not _is_current_session_console()` 判断 —— 用户一通过远程桌面连进来，
-    会话不是控制台会话，立刻被 tscon 挂走、把用户踢下线（"我进来只能拼手速
-    关掉"）。现在只在 **断开/锁屏** 时挂起：手动关闭远程桌面 → 保活接管；
-    重新连进来 → 会话变活跃 → 保活自动暂停，直到再次手动关闭远程桌面。
+    ⚠️ 关键：**绝不在用户正在使用时挂起**。RDP 活跃且桌面有前台窗口 →
+    绝不 tscon（历史上"用户一连进来就被挂走、只能拼手速关掉"的事故）。
+    无前台态也有 90 秒宽限期，防止 RDP 最小化等过渡态误踢。
 
-    `force=True` 无论当前状态都尝试挂回控制台（供需要强制挂起的场景）；否则
-    仅在检测到断开/锁屏等不可交互状态时才挂起。启动时用 force=False。
+    `force=True` 无论当前状态都尝试挂回控制台（供发送路径自愈等场景）。
 
     Returns:
         (ok, message)
     """
+    global _null_fg_since
+
     _apply_anti_lock()
 
-    need_hang = force or _is_session_disconnected() or not _input_desktop_accessible()
+    if force:
+        ok, msg = hang_to_console()
+        if ok:
+            logger.info("会话保活（强制）：已挂回本机控制台（%s）", msg)
+        return ok, msg
 
-    if not need_hang:
+    p = probe_desktop()
+    if p["foreground"]:
+        _null_fg_since = 0.0  # 有前台了：清掉无前台计时
+    else:
+        if not _null_fg_since:
+            _null_fg_since = time.time()
+
+    need, reason = should_hang(
+        p["session_state"], p["input_desktop"], p["foreground"],
+        _null_fg_since, time.time(),
+    )
+    if not need:
         return True, "会话处于活动状态，无需挂起"
 
+    logger.info("会话自愈触发：%s", reason)
     ok, msg = hang_to_console()
     if ok:
+        _null_fg_since = 0.0
         logger.info("会话保活：已自动挂回本机控制台（%s）", msg)
     return ok, msg
 
