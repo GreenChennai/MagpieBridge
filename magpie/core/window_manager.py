@@ -38,6 +38,8 @@ class WindowManager:
     def __init__(self, window_title: str = "微信") -> None:
         self.window_title = window_title
         self._hwnd: Optional[int] = None
+        # 挂回控制台后的「无前台窗口期」置前重试预算（ADR-0006，现场实测约 1 分钟内恢复）
+        self._fg_settle_timeout: float = 45.0
 
     def find_window(self) -> Optional[int]:
         """Find WeChat window handle by title."""
@@ -90,6 +92,10 @@ class WindowManager:
         普通 SetForegroundWindow 经常被静默拒绝（返回 0、foreground 仍是
         0/别的窗口），典型场景就是后台自动化进程。经典解法：把自己线程
         Attach 到前台线程，借它的名义抬窗口。
+
+        v5.0（ADR-0006）：tscon 挂回控制台后的头几十秒，整个桌面可能处于
+        「无前台」窗口期，上述方法全部被拒。备选链（现场实验验证有效）：
+        SwitchToThisWindow 强制切换 → 最小化+恢复强制激活。
         """
         kernel32 = ctypes.windll.kernel32
         fg = user32.GetForegroundWindow()
@@ -111,6 +117,28 @@ class WindowManager:
                     user32.AttachThreadInput(ct, ft, False)
                 except Exception:
                     pass
+        if ok and user32.GetForegroundWindow() == hwnd:
+            return True
+
+        # 备选 1：SwitchToThisWindow —— 强制切换，前台锁豁免
+        try:
+            user32.SwitchToThisWindow(hwnd, True)
+            time.sleep(0.3)
+            if user32.GetForegroundWindow() == hwnd:
+                return True
+        except Exception:
+            pass
+
+        # 备选 2：最小化→恢复 —— 强制激活窗口（位置不变）
+        try:
+            user32.ShowWindow(hwnd, 6)   # SW_MINIMIZE
+            time.sleep(0.25)
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            time.sleep(0.3)
+            if user32.GetForegroundWindow() == hwnd:
+                return True
+        except Exception:
+            pass
         return bool(ok)
 
     def _click_titlebar_to_focus(self, hwnd: int) -> bool:
@@ -172,14 +200,21 @@ class WindowManager:
                 user32.ShowWindow(hwnd, SW_SHOW)
             time.sleep(0.25)
             got = False
-            for attempt in range(3):
+            # v5.0（ADR-0006）：tscon 挂回控制台后的「无前台窗口期」内所有置前
+            # 都会被拒——改为带截止时间的重试循环（默认 45s），等待桌面就绪。
+            deadline = time.time() + self._fg_settle_timeout
+            attempt = 0
+            while time.time() < deadline:
+                attempt += 1
                 if self._force_foreground(hwnd):
                     got = True
                     break
                 # Windows 前台锁定：轻按 Alt 解除后重试（无修饰键组合，不触发任何热键）
                 user32.keybd_event(0x12, 0, 0, 0)      # VK_MENU down
                 user32.keybd_event(0x12, 0, 2, 0)      # VK_MENU up
-                time.sleep(0.15)
+                logger.info("置前第 %d 次失败，等待前台就绪后重试（剩余 %.0fs）",
+                            attempt, deadline - time.time())
+                time.sleep(3)
             if not got:
                 # API 全被前台锁拒绝 → 物理鼠标点击标题栏（点击不受前台锁限制）
                 got = self._click_titlebar_to_focus(hwnd)
