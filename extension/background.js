@@ -684,12 +684,11 @@ self.addEventListener('unhandledrejection', (event) => {
 console.log('[LeadsLinker] Service Worker 启动完成 (background.js 顶层执行完毕)');
 
 // ============================================================
-// 调试通道逻辑(原 debug.js)已内联, 消除 importScripts 外部依赖
+// 调试通道逻辑(原 debug.js)已内联到本段, 无 importScripts 依赖
 // ============================================================
 // LeadsLinker 调试通道 - 后台中继 (MV3 service worker)
 // 架构: AI -> MagpieBridge(:3000 插件中继) -> 本模块轮询领取命令
 //       -> 抖音来客 content script 执行 -> 结果回传 -> AI 拉取
-// 本文件由 background.js 顶部 importScripts('debug.js') 加载。
 
 (function () {
   'use strict';
