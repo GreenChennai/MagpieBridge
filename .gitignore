@@ -24,3 +24,4 @@ config.json
 # --- 杂项 ---
 *.log
 .DS_Store
+_wiki/
