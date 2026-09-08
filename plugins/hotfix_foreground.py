@@ -16,7 +16,7 @@
 
 PLUGIN = {
     "name": "hotfix_foreground",
-    "version": "1.2.0",
+    "version": "1.4.1",
     "description": "热修补丁: 置前备选链+前台就绪等待(ADR-0006), 供旧实例热加载",
     "author": "MagpieBridge",
     "events": [],
@@ -39,23 +39,126 @@ def _install() -> bool:
     if not getattr(wm, "_hotfix_foreground_applied", False):
         _install_foreground_patch(wm)
 
+    # v1.4.2: 撤销 v1.2 装的「尾部截断兜底」wrapper(现场证明危险——列表中
+    # 存在真实同尾短群「佛山投流工作群」≠「测试的佛山投流工作群」), 从影子
+    # 模块恢复纯净实现。无条件执行, 不吃 applied 标记。
+    try:
+        import importlib.util as _ilu
+        from magpie.core import target_guard as tg
+
+        spec = _ilu.spec_from_file_location("_tg_clean_v142", tg.__file__)
+        clean = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(clean)
+        tg.name_matches = clean.name_matches
+        from magpie.core import wechat_adapter_4x as adapter_mod
+        adapter_mod.name_matches = clean.name_matches
+        logger.info("name_matches 已恢复纯净实现(尾部截断兜底撤销)")
+    except Exception as e:
+        logger.warning("name_matches 恢复失败: %s", e)
+
     try:
         from magpie.core import wechat_adapter_4x as adapter_mod
-        if not getattr(adapter_mod, "_hotfix_name_match_applied", False):
-            _install_name_match_patch(adapter_mod)
+        if getattr(adapter_mod.WeChat4xAdapter, "_hotfix_title_match_applied", False):
+            _restore_title_match(adapter_mod)
     except Exception as e:
-        logger.warning("name_matches 补丁失败: %s", e)
+        logger.warning("_title_matches 恢复失败: %s", e)
 
-    # ocr.find_contact_by_name 是函数内 import, patch target_guard 模块属性
-    # 即可覆盖它以及其它运行时 import 的调用点(plugins/leads_forwarder 等)
     try:
-        import magpie.core.target_guard as tg
-        if not getattr(tg, "_hotfix_name_match_applied", False):
-            _install_name_match_patch(tg)
+        from magpie.core import wechat_adapter_4x as adapter_mod
+        if not getattr(adapter_mod.WeChat4xAdapter, "_hotfix_search_applied", False):
+            _install_search_expand_patch(adapter_mod)
     except Exception as e:
-        logger.warning("target_guard.name_matches 补丁失败: %s", e)
+        logger.warning("search_contact 补丁失败: %s", e)
 
     return True
+
+
+def _restore_title_match(adapter_mod) -> None:
+    """从 v1.3 wrapper 的闭包里恢复原始 _title_matches 函数。"""
+    import types
+
+    cur = getattr(adapter_mod.WeChat4xAdapter, "_title_matches")
+    fn = getattr(cur, "__func__", cur)
+    for cell in (getattr(fn, "__closure__", None) or []):
+        try:
+            inner = cell.cell_contents
+        except (ValueError, TypeError):
+            continue
+        f = getattr(inner, "__func__", inner)
+        if isinstance(f, types.FunctionType) and f.__name__ == "_title_matches":
+            adapter_mod.WeChat4xAdapter._title_matches = f
+            logger.info("_title_matches 已恢复原始实现(子串兜底撤销)")
+            return
+    logger.warning("未能从闭包恢复 _title_matches(保持现状)")
+
+
+def _install_search_expand_patch(adapter_mod) -> None:
+    """折叠置顶聊天展开重扫(ADR-0007 现场最终修复)。
+
+    现场真相: 目标群「测试的佛山投流工作群」在**折叠的置顶聊天区**里,
+    主会话列表不可见; 列表中的「佛山投流工作群」是另一个真实群。
+    search_contact 扫不到目标时 → OCR 找「折叠置顶聊天」按钮 → 点击展开
+    → 再扫一遍。
+    """
+    import time as _t
+
+    orig_search = adapter_mod.WeChat4xAdapter.search_contact
+
+    def _expand_folded_top_chats(self) -> bool:
+        try:
+            from magpie.core import capture, ocr
+            r = self._window.get_window_rect()
+            if not r:
+                return False
+            img = capture.grab_screen_region(r[0], r[1], r[2], r[3])
+            if not img:
+                return False
+            for t in ocr.ocr_recognize(img):
+                if "折叠置顶聊天" in (t["text"] or ""):
+                    xs = [p[0] for p in t["bbox"]]
+                    ys = [p[1] for p in t["bbox"]]
+                    cx = r[0] + int(sum(xs) / len(xs))
+                    cy = r[1] + int(sum(ys) / len(ys))
+                    logger.info("发现折叠置顶聊天按钮(%d,%d), 点击展开", cx, cy)
+                    self._human.click_at(cx, cy)
+                    _t.sleep(1.2)
+                    return True
+        except Exception:
+            logger.exception("展开折叠置顶聊天异常")
+        return False
+
+    def search_contact_v2(self, name, *args, **kwargs):
+        ok = orig_search(self, name, *args, **kwargs)
+        if ok:
+            return True
+        logger.info("主列表未找到 %r, 尝试展开折叠置顶聊天后重扫一次", name)
+        if _expand_folded_top_chats(self):
+            return orig_search(self, name, *args, **kwargs)
+        return False
+
+    adapter_mod.WeChat4xAdapter.search_contact = search_contact_v2
+    adapter_mod.WeChat4xAdapter._hotfix_search_applied = True
+    logger.info("search_contact 折叠置顶展开重扫已安装")
+
+
+def _install_title_match_patch(adapter_mod) -> None:
+    """标题验证子串兜底(ADR-0007): 切换会话后 OCR 读聊天区标题复核, 现场
+    发现标题被稳定截断+噪声 —— 「测试的佛山投流工作群(13)」读成
+    「州投流工作群(13)0」。标题验证是**单标题、无候选歧义**场景, 子串规则安全:
+    净化(去成员数/尾部数字)后是目标的子串且长度>=6 → 认定已切换到目标。
+    """
+    import re as _re
+
+    orig = adapter_mod.WeChat4xAdapter._title_matches
+
+    def title_matches_v2(self, title, target):
+        # v1.4 撤销子串兜底: "佛山投流工作群(13)" 是另一个真实群,
+        # 放行会把消息发进错误的群! 标题校验保持严格。
+        return orig(self, title, target)
+
+    adapter_mod.WeChat4xAdapter._title_matches = title_matches_v2
+    adapter_mod.WeChat4xAdapter._hotfix_title_match_applied = True
+    logger.info("_title_matches 子串兜底已安装(WeChat4xAdapter)")
 
 
 def _install_name_match_patch(host_mod) -> None:
@@ -67,19 +170,10 @@ def _install_name_match_patch(host_mod) -> None:
     orig = host_mod.name_matches
 
     def name_matches_v2(candidate, target, allow_truncation=True, reject_numbered=True):
-        if orig(candidate, target, allow_truncation=allow_truncation,
-                reject_numbered=reject_numbered):
-            return True
-        try:
-            from magpie.core.target_guard import normalize as _norm
-            c = _norm(candidate or "")
-            t = _norm(target or "")
-            if len(c) >= 6 and len(t) > len(c) and t.endswith(c):
-                logger.info("群名匹配(显示截断兜底): 列表显示 %r ≙ 目标 %r", candidate, target)
-                return True
-        except Exception:
-            pass
-        return False
+        # v1.4 撤销尾部截断兜底: 现场证明列表中存在真实同尾短群
+        # ("佛山投流工作群" ≠ "测试的佛山投流工作群"), 放行会点错群!
+        return orig(candidate, target, allow_truncation=allow_truncation,
+                    reject_numbered=reject_numbered)
 
     host_mod.name_matches = name_matches_v2
     host_mod._hotfix_name_match_applied = True

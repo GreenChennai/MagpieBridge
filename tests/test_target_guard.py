@@ -49,18 +49,9 @@ class TestNameMatches:
         assert name_matches("测试的佛山投流工", "测试的佛山投流工作群", allow_truncation=False)
         assert name_matches("测试的佛山投流工作群", "测试的佛山投流工作群", allow_truncation=False)
 
-    def test_display_tail_truncation(self):
-        # ADR-0007 现场案例：微信列表把长群名渲染成尾部——
-        # 「测试的佛山投流工作群」显示为「佛山投流工作群」（相似度仅 0.824）
-        assert name_matches("佛山投流工作群", "测试的佛山投流工作群")
-
-    def test_display_tail_truncation_min_length(self):
-        # 尾部候选太短（<6）不放行，防短串误中
+    def test_tail_short_group_is_a_different_group(self):
+        """ADR-0007 现场教训: 列表里「佛山投流工作群」是真实存在的另一个群,
+        与「测试的佛山投流工作群」不是同一个 —— 尾部相似绝不放行(曾把消息
+        发进错误群的候选规则, 已撤销)。"""
+        assert not name_matches("佛山投流工作群", "测试的佛山投流工作群")
         assert not name_matches("工作群", "测试的佛山投流工作群")
-
-    def test_tail_rule_ambiguity_left_to_find_unique(self):
-        # 列表里另有独立的「佛山投流工作群」短群时, 两条规则都命中同一目标,
-        # 歧义由 find_unique 的唯一性检查拒绝 —— 这里只验证单对规则方向正确。
-        assert name_matches("佛山投流工作群", "测试的佛山投流工作群")
-        # 反向不成立: 目标是候选的尾部时仍拒绝(方向性拒绝)
-        assert not name_matches("测试的佛山投流工作群", "佛山投流工作群")

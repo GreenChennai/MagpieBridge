@@ -625,9 +625,15 @@ class WeChat4xAdapter(WeChatAdapter):
             else:
                 no_new_streak += 1
                 if no_new_streak >= 2:
-                    # 已滚到列表底部且连续两轮无新内容 → 全列表扫完仍未找到。
-                    # 通常发生在合成输入失效（会话锁屏/RDP 断开）导致滚动根本没
-                    # 生效 —— 此时再滚 25 轮也是徒劳，快速失败并明确告警。
+                    # 已滚到列表底部且连续两轮无新内容 → 主列表扫完仍未找到。
+                    # 常见根因（ADR-0007）: 目标群在**折叠的置顶聊天区**里,
+                    # 主列表不可见。展开后重扫一次; 展开按钮不存在（无置顶
+                    # 折叠）则按原逻辑快速失败并告警。
+                    if self._expand_folded_top_chats():
+                        logger.info("已展开折叠置顶聊天, 重扫会话列表找 '%s'", name)
+                        no_new_streak = 0
+                        self._scroll_to_top()
+                        continue
                     logger.error("已滚动到聊天列表底部仍未找到 '%s'（连续 2 轮无新内容；"
                                  "若为锁屏/输入失效请先恢复会话桌面）", name)
                     audit("搜索联系人", name, 结果="未找到(到底,疑似输入失效)", 滚动轮数=scroll_round + 1)
@@ -640,6 +646,33 @@ class WeChat4xAdapter(WeChatAdapter):
         logger.error("滚动后仍未找到联系人 '%s'", name)
         audit("搜索联系人", name, 结果="未找到", 滚动轮数=25)
         self.clear_pending_target()
+        return False
+
+    def _expand_folded_top_chats(self) -> bool:
+        """OCR 定位「折叠置顶聊天」按钮并点击展开（ADR-0007）。
+
+        目标群被置顶且微信折叠了置顶区时, 主会话列表看不到它; 用户经验:
+        点击「折叠置顶聊天」展开后即可见。返回是否找到并点击了按钮。
+        """
+        try:
+            r = self._window.get_window_rect()
+            if not r:
+                return False
+            img = capture.grab_screen_region(r[0], r[1], r[2], r[3])
+            if not img:
+                return False
+            for t in ocr_recognize(img):
+                if "折叠置顶聊天" in (t.get("text") or ""):
+                    xs = [p[0] for p in t["bbox"]]
+                    ys = [p[1] for p in t["bbox"]]
+                    cx = r[0] + int(sum(xs) / len(xs))
+                    cy = r[1] + int(sum(ys) / len(ys))
+                    logger.info("发现折叠置顶聊天按钮(%d,%d), 点击展开", cx, cy)
+                    self._human.click_at(cx, cy)
+                    time.sleep(1.2)
+                    return True
+        except Exception:
+            logger.exception("展开折叠置顶聊天异常")
         return False
 
     def get_input_box_position(self) -> Optional[tuple[int, int]]:
