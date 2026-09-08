@@ -163,6 +163,14 @@ def name_matches(
     if allow_truncation and t.startswith(c) and _truncation_ok(c, t):
         return True
 
+    # 显示截断兜底（ADR-0007，2026-09-08 现场）：微信会话列表对超长群名
+    # 可能只渲染尾部 —— 「测试的佛山投流工作群」列表显示为「佛山投流工作群」，
+    # 相似度仅 0.824 被旧规则拒绝 → 发送失败。规则：候选是目标的**尾部**
+    # 且长度 >= 6（防短串误中）→ 认定同一会话；若列表里另有独立的同尾部
+    # 群，find_unique 的唯一性检查会自动拒绝，安全性不变。
+    if len(c) >= 6 and len(t) > len(c) and t.endswith(c):
+        return True
+
     # 方向性拒绝：目标是候选的前缀 —— 「客户群」⊂「客户群2」，绝不放行
     if c.startswith(t):
         return False

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LeadsLinker - 线索转发",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "检测抖音来客投流线索(全量容错扫描:独立微信号/二维码图片)，转发到OneBot插件；内置调试通道供AI分析页面 (LeadsLinker V3 for MagpieBridge)",
   "permissions": [
     "activeTab",

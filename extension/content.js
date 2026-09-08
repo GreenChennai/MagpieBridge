@@ -4,6 +4,7 @@
 //   1. 全量扫描: 所有"最近(今天/12h内或有未读)"的会话都会点开扫一遍, 与平台标签无关。
 //      平台"已留资"标签会漏: 客户直接发微信号(如 88600772)或发微信二维码图片时,
 //      来客只标"广告源"。标签仅用于排队优先级。
+// v3.0.1: 姓名净化(sanitizeName, 标签词≠昵称)+虚拟列表滚动刷新+未就绪不误报(ADR-0007)
 //   2. 会话窗口提取: 只取客户(left)消息, 联系方式三级容错:
 //      手机号(允许空格/横线) > "微信:xxx"标注 > 整条即微信号ID > 二维码图片
 //      时间取该消息上方最近的 .csUI-MsgTimeGap (完整日期, 最可靠)
@@ -52,6 +53,23 @@
   var STANDALONE_WECHAT_RE = /^\s*([a-zA-Z][a-zA-Z0-9_\-]{4,19}|[0-9]{5,20})\s*$/;
   var CONVID_RE = /conv(\d{6,})/i;
   var LEAD_TAGS = ['已留资', '广告源', '经营源'];
+
+  // 姓名净化(2026-09-08): 标签词("广告源/已留资/经营源")不是昵称。
+  // 虚拟列表未渲染昵称时, 窗口标题会是 "广告源已留资convXXX" 这种纯标签串,
+  // 旧 titleName 正则会把 "广告源" 吃成客户名(洋崽仔被识别成广告源的根因)。
+  // 规则: 空/正在输入/等于标签词/仅由标签词组成 → 一律视为「昵称未就绪」。
+  function sanitizeName(n) {
+    var t = (n || '').trim();
+    if (!t || isTypingText(t)) return '';
+    var rest = t;
+    for (var i = 0; i < LEAD_TAGS.length; i++) {
+      rest = rest.split(LEAD_TAGS[i]).join('');
+    }
+    rest = rest.trim();
+    if (!rest) return '';            // 整串都是标签词 → 没有真名
+    if (t !== rest && rest.length < 2) return '';  // 剥掉标签后只剩 1 字符 → 可疑
+    return t;
+  }
   var OWNER_HINTS = ['官方号', '安信德', '创客龙', '客服', '机器人', '用户触达', '智能'];
 
   var CONFIG = {
@@ -182,6 +200,42 @@
   // ------------------------------------------------------------ 会话项解析
   function convItems() { return Array.prototype.slice.call(document.querySelectorAll(SEL.convItem)); }
 
+  // 虚拟列表懒加载刷新(2026-09-08, 用户实测经验):
+  // rc-virtual-list 只渲染可视区条目, 未滚动到的会话根本没有头像/昵称 DOM。
+  // 「滚动到底再滚回顶」会强制 React 把全部条目依次挂载一遍, 挂载期间
+  // MutationObserver 会持续触发重扫。返回 Promise, 完成后列表为"已尽力加载"态。
+  var lastListRefresh = 0;
+  function listScrollEl() {
+    return document.querySelector('div.rc-virtual-list-holder')
+      || document.querySelector('[class*="rc-virtual-list"] [class*="holder"]');
+  }
+  function refreshListScroll() {
+    var el = listScrollEl();
+    if (!el) return Promise.resolve(false);
+    setHealth('llListRefresh', Date.now());
+    var top = el.scrollTop, max = el.scrollHeight - el.clientHeight;
+    var stepDown = function () {
+      if (el.scrollTop >= max - 4) return Promise.resolve();
+      el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + el.clientHeight * 0.9);
+      return sleep(160).then(stepDown);
+    };
+    return stepDown().then(function () { return sleep(500); })
+      .then(function () { el.scrollTop = top; return sleep(400); })
+      .then(function () { return true; })
+      .catch(function () { return false; });
+  }
+
+  // 有线索标记/未读但昵称未就绪的条目数 → 决定是否需要滚动刷新
+  function countUnnamedLeadItems() {
+    var n = 0;
+    var items = convItems();
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if ((itemHasLeadMark(it) || unreadCount(it) > 0) && !itemName(it)) n++;
+    }
+    return n;
+  }
+
   function itemHasLeadMark(item) {
     var t = text(item);
     return t.indexOf('已留资') >= 0;
@@ -196,7 +250,7 @@
   }
 
   function itemName(item) {
-    var n = text(item.querySelector(SEL.convName));
+    var n = sanitizeName(text(item.querySelector(SEL.convName)));
     if (n && !isTypingText(n)) return n;
     return '';
   }
@@ -261,8 +315,14 @@
 
   function titleName(title) {
     // "桃O总广告源已留资conv..." → 昵称 = 开头到第一个标签词/conv 之前
-    var m = (title || '').match(/^(.{1,24}?)(?:广告源|已留资|经营源|置顶|私信|conv\d)/i);
-    return m ? m[1].trim() : '';
+    // (2026-09-08) 标题以标签词开头(虚拟列表未渲染昵称, 如 "广告源已留资convXXX")
+    // 时不存在昵称前缀 —— 旧正则会把 "广告源" 吃成名字(洋崽仔误判根因), 直接判未就绪。
+    var t = (title || '').trim();
+    for (var i = 0; i < LEAD_TAGS.length; i++) {
+      if (t.indexOf(LEAD_TAGS[i]) === 0) return '';
+    }
+    var m = t.match(/^(.{1,24}?)(?:广告源|已留资|经营源|置顶|私信|conv\d)/i);
+    return m ? sanitizeName(m[1].trim()) : sanitizeName(t.length <= 24 ? t : '');
   }
 
   // 按 DOM 顺序解析当前会话窗口: 每条消息带最近 timegap
@@ -446,11 +506,14 @@
     deepBusy = true;
     try { item.click(); } catch (e) {}
     return sleep(1300).then(function () {
-      // 昵称异步渲染容错: 点开后再最多等 3s, 直到列表出现真名
+      // 昵称异步渲染容错: 点开后再最多等 ~5s; 列表项昵称与窗口标题昵称
+      // 渲染时机不同, 任一就绪即可(sanitizeName 会拦住标签词假名)。
       var tries = 0;
       var waitName = function () {
-        if (itemName(item) || tries++ >= 4) return Promise.resolve();
-        return sleep(700).then(waitName);
+        if (itemName(item) || tries++ >= 6) return Promise.resolve();
+        var t = titleName(windowTitle());
+        if (t) return Promise.resolve();
+        return sleep(800).then(waitName);
       };
       return waitName();
     }).then(function () {
@@ -524,32 +587,43 @@
   function handleFallbackName(lead, keys) {
     readStorage('nameFixPending').then(function (fix) {
       var fresh = fix && fix.conv === lead.key.conv && (Date.now() - fix.ts) < 30 * 60000;
-      if (fresh && fix.attempt >= 1) {
-        // 已经历过一次刷新 → 不再等, 用兜底名转发
+      if (fresh && fix.attempt >= 2) {
+        // 滚动刷新 + 整页刷新都试过 → 不再等, 用兜底名转发(绝不丢线索)
         removeStorage('nameFixPending');
         setHealth('llNameFix', 'gave up, keep fallback');
         proceedSend(lead, keys);
         return;
       }
-      if (fresh) return; // 等待刷新/重扫中(attempt===0), 本条暂不转发
-      // 新记录: 存现场, 准备刷新重试
+      if (fresh) return; // 等待刷新/重扫中, 本条暂不转发
+      // 新记录: 先做轻量的「虚拟列表滚动刷新」(用户实测: 滚下去再滚回来就加载出
+      // 头像/昵称), 无效才升级到整页 reload —— 不再让标签词假名抢先入库。
       writeStorage({ nameFixPending: { conv: lead.key.conv, lead: lead, attempt: 0, ts: Date.now() } });
-      setHealth('llNameFix', 'pending reload conv=' + lead.key.conv);
-      log('昵称未就绪(后台延迟渲染), 将自动刷新页面重试:', lead.name || '', lead.phone || lead.wechat);
-      scheduleNameFixReload(0);
+      setHealth('llNameFix', 'pending scroll-refresh conv=' + lead.key.conv);
+      log('昵称未就绪, 先滚动刷新虚拟列表重试:', lead.name || '', lead.phone || lead.wechat);
+      lastListRefresh = Date.now();
+      refreshListScroll().then(function () {
+        readStorage('nameFixPending').then(function (fix2) {
+          if (!fix2) return;
+          fix2.attempt = 1;
+          writeStorage({ nameFixPending: fix2 });
+          setTimeout(detectLeads, 500);
+          // 滚动刷新没救回来 → 30s 后升级整页 reload(原机制)
+          setTimeout(scheduleNameFixReload, 30000);
+        });
+      });
     });
   }
 
   function scheduleNameFixReload(tries) {
     readStorage('nameFixPending').then(function (fix) {
-      if (!fix || fix.attempt >= 1) return; // 已刷新过/已清 → 不再刷
+      if (!fix || fix.attempt >= 2) return; // 已整页刷新过/已清 → 不再刷
       var quiet = document.hidden || (Date.now() - lastUserActivity) > 10000;
       readStorage('llLastReloadTs').then(function (lastTs) {
         var spaced = !lastTs || (Date.now() - lastTs) > 3 * 60000;
         if (quiet && spaced) {
-          fix.attempt = 1;
+          fix.attempt = 2;
           writeStorage({ nameFixPending: fix, llLastReloadTs: Date.now() });
-          log('自动刷新页面以获取真实昵称...');
+          log('滚动刷新无效, 自动刷新页面以获取真实昵称...');
           setTimeout(function () { try { location.reload(); } catch (e) {} }, 400);
         } else if (tries < 6) {
           setTimeout(function () { scheduleNameFixReload(tries + 1); }, 30000);
@@ -631,6 +705,16 @@
   function detectLeadsInner() {
     var items = convItems();
     if (!items.length) { setHealth('llScanNote', 'no conversationItem'); return; }
+
+    // 懒加载预刷新(2026-09-08): 有线索/未读条目但昵称未就绪 → 先滚动刷新虚拟列表
+    // (滚动下去再滚回来, 触发 React 挂载全部条目), 60s 防抖防循环。
+    if (!busy.deepQueue && !deepBusy && (Date.now() - lastListRefresh) > 60000
+        && countUnnamedLeadItems() > 0) {
+      lastListRefresh = Date.now();
+      setHealth('llScanNote', 'list refresh for unnamed leads');
+      refreshListScroll().then(function () { setTimeout(detectLeads, 600); });
+      return;
+    }
 
     // 1) 当前激活窗口(用户在看的 / 刚点开过的): 免费直接检查
     var active = document.querySelector(SEL.convActive);
