@@ -114,6 +114,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import tempfile
 from html import unescape as _html_unescape
 
@@ -130,6 +131,61 @@ def escape_html(text):
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def _find_wpi_cli():
+    """定位 WPI-noGUI-cli.exe(GreenChennai/WPI, 网页→PNG 导出器, ADR-0008)。
+
+    查找顺序: 环境变量 MAGPIE_WPI → exe 旁 tools/WPI/ → 仓库 tools/WPI/ → PATH。
+    找不到返回 None(上层自动回退 Edge/playwright/Pillow)。
+    """
+    cands = []
+    env = os.environ.get("MAGPIE_WPI")
+    if env:
+        cands.append(env)
+    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 插件根的上级(开发态仓库根)
+    for b in (os.path.dirname(base), base):
+        cands.append(os.path.join(b, "tools", "WPI", "WPI-noGUI-cli.exe"))
+        cands.append(os.path.join(b, "WPI", "WPI-noGUI-cli.exe"))
+    try:
+        exe_dir = os.path.dirname(sys.executable)
+        cands.insert(0, os.path.join(exe_dir, "tools", "WPI", "WPI-noGUI-cli.exe"))
+        cands.insert(0, os.path.join(exe_dir, "WPI-noGUI-cli.exe"))
+    except Exception:
+        pass
+    for p in cands:
+        if p and os.path.isfile(p):
+            return p
+    import shutil
+    return shutil.which("WPI-noGUI-cli")
+
+
+def _render_with_wpi(html_content, wpi_path, timeout=60):
+    """用 WPI-noGUI-cli 渲染 HTML → PNG 字节（同步阻塞, 调用方丢线程池）。
+
+    流程: HTML 写临时文件 → `WPI-noGUI-cli --source card.html --output card.png
+    --width 520 --scale 2`(整页导出) → 读回 PNG 字节。WPI 自带无头浏览器,
+    渲染质量与 Edge 一致。
+    """
+    with tempfile.TemporaryDirectory(prefix="lf_wpi_") as td:
+        html_path = os.path.join(td, "card.html")
+        png_path = os.path.join(td, "card.png")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        proc = subprocess.run(
+            [wpi_path, "--source", html_path, "--output", png_path,
+             "--width", "520", "--scale", "2"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+        out = os.path.join(td, "card.png")
+        if proc.returncode != 0 or not os.path.isfile(out):
+            logger.warning("[LeadsLinker] WPI 退出码=%s 输出缺失: %s",
+                           proc.returncode, (proc.stderr or proc.stdout or "")[:200])
+            return None
+        with open(out, "rb") as f:
+            data = f.read()
+        logger.info("[LeadsLinker] WPI 渲染成功: %d bytes", len(data))
+        return data if data else None
 
 
 def _find_edge_path():
@@ -224,9 +280,19 @@ def _render_with_edge(html_content, edge_path, viewport_h=2400):
 
 
 async def render_html_to_image(html_content):
-    # v4.8.0 三级回退：Edge headless（系统自带 Chromium）→ playwright → Pillow。
-    # 生产 exe 无 playwright 浏览器二进制，Pillow 纯绘图（无 CSS、圆角/字体/渐变全靠
-    # 手画，画质天花板低）；Edge 渲染同一 HTML 直接获得浏览器级输出。
+    # v3.0.2 四级回退：WPI-noGUI-cli(用户指定, ADR-0008) → Edge headless →
+    # playwright → Pillow。WPI 是 GreenChennai/WPI 的命令行网页导出器,
+    # 输出质量与 Edge 相同且免装浏览器; exe 放 exe 旁 tools/WPI/ 即自动启用。
+    wpi = _find_wpi_cli()
+    if wpi:
+        try:
+            png = await asyncio.to_thread(_render_with_wpi, html_content, wpi)
+            if png:
+                return png
+            logger.warning("[LeadsLinker] WPI 渲染未产出文件, 回退 Edge/playwright/Pillow")
+        except Exception as e:
+            logger.warning("[LeadsLinker] WPI 渲染失败(%s), 回退 Edge/playwright/Pillow", e)
+
     edge = _find_edge_path()
     if edge:
         try:

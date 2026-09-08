@@ -20,7 +20,7 @@ logger = logging.getLogger("leads_forwarder")
 
 PLUGIN = {
     "name": "leads_forwarder",
-    "version": "3.0.0",  # LeadsLinker V3：并入 MagpieBridge 主仓；群名比对委托宿主 target_guard（ADR-0004）
+    "version": "3.0.2",  # LeadsLinker V3：并入 MagpieBridge 主仓；群名比对委托宿主 target_guard（ADR-0004）
     "description": "LeadsLinker: 线索转发+受理管理+调试通道+CSV历史去重",
     "author": "LeadsLinker",
     "events": ["message"],
@@ -110,6 +110,7 @@ REJECT_KEYWORDS = ("0", "没空", "pass", "不接", "跳过", "不要", "no")
 # 的线索 key（p:电话 / w:微信号），重复请求直接按已受理返回，不再重新入队。
 _inflight_keys: set = set()
 _inflight_lock = None
+_batch_lock = asyncio.Lock()      # 线索级批次锁(v3.0.2): 图→联系方式→@ 完整执行完才轮到下一条
 
 
 def _get_inflight_lock():
@@ -824,31 +825,37 @@ async def _forward_task(engine, leads_data, saved_serials, group_name, member_na
       整批只会二次刷屏；未送达步骤已有 alerter 邮件告警给运维）
     - 受理跟踪仍按 reply_handling 开关
     - 结束时释放在途去重 key
+
+    v3.0.2: 批次锁 —— 多条线索同时到达时, 每条线索的「图片→联系方式→@销售」
+    三步必须在**下一条线索开始前**完整执行（宿主 op_queue 只保证单步串行,
+    不保证线索级顺序, 曾出现 图1/图2/联1/联2/@1/@2 交错刷屏）。按 create_task
+    的创建顺序持锁排队, 即"先来先完整发完"。
     """
-    try:
-        all_sent = False
+    async with _batch_lock:
         try:
-            all_sent = await _send_lead_batch(engine, leads_data, saved_serials,
-                                              group_name, member_name)
+            all_sent = False
+            try:
+                all_sent = await _send_lead_batch(engine, leads_data, saved_serials,
+                                                  group_name, member_name)
+            finally:
+                if record_history:
+                    try:
+                        for lead in leads_data:
+                            _history_record(lead)
+                    except Exception as e:
+                        logger.info(f"[LeadsLinker] 写历史CSV失败: {e}")
+            if not all_sent:
+                logger.error("[LeadsLinker] 本批存在未确认送达步骤，已写历史防整批重发；"
+                             "请查收失败告警邮件/日志人工确认")
+            if _reply_handling_enabled():
+                for i, lead in enumerate(leads_data):
+                    serial = saved_serials[i] if i < len(saved_serials) else f"unknown_{i}"
+                    pending_id = f"{serial}_{datetime.now().timestamp()}"
+                    await _add_pending_lead(pending_id, lead, serial, group_name, member_name, engine)
+        except Exception:
+            logger.exception("[LeadsLinker] 后台转发任务异常")
         finally:
-            if record_history:
-                try:
-                    for lead in leads_data:
-                        _history_record(lead)
-                except Exception as e:
-                    logger.info(f"[LeadsLinker] 写历史CSV失败: {e}")
-        if not all_sent:
-            logger.error("[LeadsLinker] 本批存在未确认送达步骤，已写历史防整批重发；"
-                         "请查收失败告警邮件/日志人工确认")
-        if _reply_handling_enabled():
-            for i, lead in enumerate(leads_data):
-                serial = saved_serials[i] if i < len(saved_serials) else f"unknown_{i}"
-                pending_id = f"{serial}_{datetime.now().timestamp()}"
-                await _add_pending_lead(pending_id, lead, serial, group_name, member_name, engine)
-    except Exception:
-        logger.exception("[LeadsLinker] 后台转发任务异常")
-    finally:
-        await _release_inflight(keys)
+            await _release_inflight(keys)
 
 
 def _build_contact_message(leads):
@@ -929,8 +936,27 @@ body {{
   background: #ffffff;
   border-radius: 24px;
   overflow: hidden;
+  position: relative;
   box-shadow: 0 20px 50px -14px rgba(60, 66, 180, 0.18), 0 6px 18px rgba(60, 66, 180, 0.06);
 }}
+/* ===== 「抖音来客」大字水印(ADR-0008): 大、但低对比 —— 正常看忽略, 仔细看可见 ===== */
+.card > div.dy-watermark {{
+  position: absolute;
+  right: -18px;
+  bottom: 46px;
+  z-index: 0;
+  font-size: 96px;
+  font-weight: 900;
+  letter-spacing: 10px;
+  line-height: 1;
+  color: rgba(91, 95, 232, 0.055);
+  transform: rotate(-9deg);
+  transform-origin: right bottom;
+  pointer-events: none;
+  white-space: nowrap;
+  user-select: none;
+}}
+.card > div:not(.dy-watermark) {{ position: relative; z-index: 1; }}
 /* ===== 顶栏：品牌渐变 + 柔光装饰 ===== */
 .card-header {{
   background: linear-gradient(125deg, #5b5fe8 0%, #7c5cf0 48%, #b14ee0 100%);
@@ -1243,6 +1269,7 @@ body {{
 .card-footer .reply {{ flex: 1; line-height: 1.6; opacity: 0.96; }}
 .card-footer .reply b {{ color: #6ee7b7; font-weight: 700; }}
 </style></head><body><div class="card">
+<div class="dy-watermark">抖音来客</div>
 
 <div class="card-header">
   <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></div>

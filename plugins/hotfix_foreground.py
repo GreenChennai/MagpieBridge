@@ -70,7 +70,49 @@ def _install() -> bool:
     except Exception as e:
         logger.warning("search_contact 补丁失败: %s", e)
 
+    try:
+        from magpie.core import wechat_adapter_4x as adapter_mod
+        if not getattr(adapter_mod.WeChat4xAdapter, "_hotfix_hasname_applied", False):
+            _install_hasname_patch(adapter_mod)
+    except Exception as e:
+        logger.warning("_input_box_has_name 补丁失败: %s", e)
+
     return True
+
+
+def _install_hasname_patch(adapter_mod) -> None:
+    """@ 选择后验证归一化(ADR-0008): 微信插入的是显示名"Green Chennai",
+    配置名是"Green_Chennai" —— 下划线/空格/大小写必须归一再比, 否则唯一
+    候选 Enter 选中后验证永远失败, 走不必要的粘贴降级。"""
+    import re as _re
+
+    def _norm_id(s):
+        return _re.sub(r"[\s_@＠….·]+", "", s or "").lower()
+
+    def has_name_v2(self, name):
+        try:
+            shot = self._get_screenshot()
+            pos = self.get_input_box_position()
+            if not shot or not pos:
+                return False
+            x, y = pos[0], pos[1]
+            region = shot.crop((max(0, x - 250), max(0, y - 80),
+                                min(shot.width, x + 300), min(shot.height, y + 25)))
+            from magpie.core.ocr import ocr_recognize
+            joined = "".join(t.get("text", "") for t in ocr_recognize(region))
+            n = _norm_id(name)
+            j = _norm_id(joined)
+            if not n:
+                return False
+            if n in j:
+                return True
+            return bool(n[-3:]) and n[-3:] in j
+        except Exception:
+            return False
+
+    adapter_mod.WeChat4xAdapter._input_box_has_name = has_name_v2
+    adapter_mod.WeChat4xAdapter._hotfix_hasname_applied = True
+    logger.info("_input_box_has_name 归一化验证已安装(WeChat4xAdapter)")
 
 
 def _restore_title_match(adapter_mod) -> None:

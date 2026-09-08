@@ -59,6 +59,15 @@ def _get_file_version(file_path: str) -> Optional[str]:
 
 logger = logging.getLogger(__name__)
 
+
+def _norm_id(s: str) -> str:
+    """@ 成员标识归一化: 去空格/下划线/@符号/省略号, 转小写。
+
+    微信里"群名片"与"成员显示名"常不一致("Green_Chennai" vs "Green Chennai"),
+    面板候选还可能带截断省略号 —— 比较前必须抹掉这些差异。
+    """
+    return re.sub(r"[\s_@＠….·]+", "", s or "").lower()
+
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 
@@ -1054,14 +1063,16 @@ class WeChat4xAdapter(WeChatAdapter):
     def send_at(self, text: str, at_name: str, target: Optional[str] = None) -> bool:
         """Send a text message with an @mention (group chat), covertly.
 
-        v0.4.17 行为（用户确认的策略）：
-        1) 先走"真@"：打 '@'+名字前缀，候选面板弹出且唯一命中 → Enter 选中
-           chip（真 @，带提及提醒）；
-        2) 面板没弹（名字没匹配到成员/输入方式差异等，微信对这类名字本来就不
-           弹面板）→ **文字直发降级**：把完整的 "@名字 正文" 粘贴进输入框原样
-           发出。用户配了 @ 谁就发谁，恰好一条、不多不少；
-        3) 成功判据统一 = 聊天区底部出现含该名字的绿色本人气泡（#9DF29F，
-           右侧；灰 #EEEEF0 的是别人发的，不算数）。
+        v5.0.1 @ 策略（ADR-0008, 用户确认）:
+        1) "picked" —— 候选面板唯一命中 → Enter 选中 chip（真 @，带提及提醒），
+           补正文后发送；
+        2) "ambiguous" —— 候选不唯一（长名打前缀时全部截断显示
+           "安信德&创客龙...", 无法认定哪条是谁）→ **清空面板输入，直接粘贴
+           "@全称 正文" 发送**。此时微信不产生真@提醒，但消息内容明确记录了
+           @ 谁；万一认错人也是用户配置的成员名不精确，责任口径清晰；
+        3) "none" —— 面板没弹/打全名也无候选 → 复核绿色气泡（可能已直发），
+           否则同样粘贴 "@全称 正文" 发送，绝不丢提醒；
+        成功判据统一 = 聊天区底部出现含该名字的绿色本人气泡。
         """
         try:
             pos = self.get_input_box_position()
@@ -1081,9 +1092,10 @@ class WeChat4xAdapter(WeChatAdapter):
             self._human.think_pause()  # thinking pause before composing
 
             body = (text or "").strip()
+            literal = f"@{at_name}" + (f" {body}" if body else "")
 
             # 1) try real mention via the candidate panel
-            picked = self._type_at_and_pick(at_name)
+            picked = self._type_at_and_pick(at_name) in ("picked",)
 
             if picked:
                 # 2a) chip 已选中：补正文
@@ -1093,19 +1105,18 @@ class WeChat4xAdapter(WeChatAdapter):
                     self.clear_pending_target()
                     return False
             else:
-                # 2b) 选人不成功。先复核"是不是已经发出去了"——pick 过程中
-                # 对唯一候选按过的 Enter 可能已把"@名字"当文字发出（旧绿色
-                # 气泡会被当成候选行，这在佛山/广州群实测发生过）。已发出
-                # 就直接成功返回，绝不补发第二条。
+                # 2b) picked 失败（含 ambiguous 多候选 / none 无候选）:
+                # 先复核"是不是已经发出去了"——pick 过程中对唯一候选按过的
+                # Enter 可能已把"@名字"当文字发出（旧绿色气泡会被当成候选行,
+                # 佛山/广州群实测发生过）。已发出就直接成功, 绝不补发第二条。
                 if self._own_bubble_sent(at_name):
                     logger.info("@复核：候选未选中但聊天区底部已有含「%s」的绿色本人气泡，"
                                 "按已发送处理（不补发）", at_name)
                     audit("发送@消息", f"@{at_name}", 结果="文字已发出（绿色气泡复核）")
                     self.clear_pending_target()
                     return True
-                # 文字直发降级：完整 "@名字 正文" 粘贴进输入框
+                # 粘贴 "@全称 正文" 直发（ADR-0008: ambiguous/none 共用此降级）
                 self._clear_input_box()
-                literal = f"@{at_name}" + (f" {body}" if body else "")
                 if not self._ensure_input_content(literal, force_paste=True):
                     audit("发送@消息", f"@{at_name}", 结果="文字直发未能写入输入框，放弃发送")
                     self._clear_input_box()
@@ -1145,25 +1156,22 @@ class WeChat4xAdapter(WeChatAdapter):
             self.clear_pending_target()
             return False
 
-    def _type_at_and_pick(self, at_name: str) -> bool:
+    def _type_at_and_pick(self, at_name: str) -> str:
         """Type '@' and pick the member from the @ candidate panel.
+
+        Returns "picked" | "ambiguous" | "none"（ADR-0008）。
 
         Phase A: type from the START (prefix); WeChat shows same-prefix members
         and we re-OCR until the target is uniquely matched, then press ENTER to
         select it (Enter confirms the top suggestion -> a real mention).
 
-        Phase B (same-prefix / truncated candidates): type instead from a
-        DISTINCTIVE TAIL of the name (from the middle to the end), which uniquely
-        filters the list; the first ENTER then inserts '@name ', and the caller
-        sends with the second ENTER.
+        选不中人宁可放弃：绝不"盲按 Enter 接受顶部建议"——面板没开时那一下
+        Enter 会把输入框里未选中的"@xxx"文本原样发出去（杨露重复发送事故根因）。
         """
-        if self._type_at_suffix(at_name):
-            return True
-
-        # 选不中人宁可放弃：绝不"盲按 Enter 接受顶部建议"——面板没开时那一下
-        # Enter 会把输入框里未选中的"@xxx"文本原样发出去（杨露重复发送事故根因）。
-        logger.info("@成员未能从候选面板选中，放弃@发送（不盲按Enter）: %s", at_name)
-        return False
+        state = self._try_search_and_pick(at_name, at_name)
+        if state == "none":
+            logger.info("@成员未能从候选面板选中，放弃@发送（不盲按Enter）: %s", at_name)
+        return state
 
     def _type_at_suffix(self, at_name: str) -> bool:
         """Type '@' + the FULL name, then try to pick from the panel.
@@ -1174,9 +1182,12 @@ class WeChat4xAdapter(WeChatAdapter):
         """
         return self._try_search_and_pick(at_name, at_name)
 
-    def _try_search_and_pick(self, at_name: str, query: str) -> bool:
+    def _try_search_and_pick(self, at_name: str, query: str) -> str:
         """Type '@'+query SLOWLY (human), OCR the panel and Enter if the target
-        is strongly shown as the top suggestion."""
+        is strongly shown as the top suggestion.
+
+        Returns: "picked" | "ambiguous" | "none"（ADR-0008 三态）。
+        ambiguous(多候选截断名)不再徒劳重试 —— 直接交 send_at 走粘贴全称。"""
         # 打半角 '@'(U+0040, 直接注入字符)：Shift+2 在中文输入法下可能打出
         # 全角"＠"，微信候选面板对全角**完全不弹** —— 之前日志里候选行全是
         # 聊天气泡、面板从未出现过的根因就在这里。
@@ -1186,11 +1197,13 @@ class WeChat4xAdapter(WeChatAdapter):
         self._type_at_query(query)
         time.sleep(0.9)
         for _ in range(3):
-            ok, order, sim = self._try_pick_at_member(at_name)
+            ok, _order, _sim, ambiguous = self._try_pick_at_member(at_name)
             if ok:
-                return True
+                return "picked"
+            if ambiguous:
+                return "ambiguous"
             time.sleep(0.4)
-        return False
+        return "none"
 
     def _type_at_query(self, query: str) -> None:
         """Type the @ query one char at a time with human pauses (never instant)."""
@@ -1207,13 +1220,17 @@ class WeChat4xAdapter(WeChatAdapter):
         so a full-name similarity score is unreliable.  Instead: if exactly ONE
         candidate row is shown, the query uniquely matched -> press ENTER to
         select it.  If 0 or >1 rows, return not-selected (caller types more).
-        Returns (selected, row_count, best_similarity).
+        Returns (selected, row_count, best_similarity, ambiguous).
+
+        v5.0.1(ADR-0008): ambiguous = 面板行数 > 1 —— 长名字打前缀时候选全部
+        截断显示("安信德&创客龙..."), 无法唯一认定, 调用方(send_at)按用户策略
+        直接粘贴"@全称 正文"发送。
         """
         try:
             shot = self._get_screenshot()
             pos = self.get_input_box_position()
             if not shot or not pos:
-                return False, 0, 0.0
+                return False, 0, 0.0, False
             x, y = pos[0], pos[1]
             left = int(self._config.chat_list_x2) + 8
             # 下缘止于 y-95（聊天区/面板带）：旧值 y-30 把**输入框首行**也扫进
@@ -1222,12 +1239,13 @@ class WeChat4xAdapter(WeChatAdapter):
             region = shot.crop(r)
             texts = ocr_recognize(region)
 
-            nm = at_name.replace(" ", "")
+            nm = _norm_id(at_name)
 
             def _name_related(line: str) -> bool:
                 """候选行与目标成员名相关（面板行是被 query 过滤过的成员名，
-                可能带截断省略号；聊天气泡/号码/时间行基本不会命中）。"""
-                cand = line.replace(" ", "").strip("@….").replace("...", "")
+                可能带截断省略号；聊天气泡/号码/时间行基本不会命中）。
+                v5.0.1: 归一化比较(下划线/空格/大小写差异抹掉)。"""
+                cand = _norm_id(line).strip(".")
                 if not cand or len(cand) < 2:
                     return False
                 return cand in nm or nm[:2] in cand or nm.endswith(cand[-2:])
@@ -1252,7 +1270,7 @@ class WeChat4xAdapter(WeChatAdapter):
                 rows.append({"line": line, "bbox": t["bbox"], "y": min(p[1] for p in t["bbox"])})
             rows.sort(key=lambda c: c["y"])
             if not rows:
-                return False, 0, 0.0
+                return False, 0, 0.0, False
             logger.info("@候选行数: %d -> %s", len(rows), [r2["line"] for r2 in rows])
 
             best_sim = 0.0
@@ -1268,14 +1286,21 @@ class WeChat4xAdapter(WeChatAdapter):
                 time.sleep(0.7)
                 if self._input_box_has_name(at_name):
                     logger.info("唯一候选，已用 Enter 选择@成员: %s (显示 %s)", at_name, best_line)
-                    return True, 1, best_sim
-            return False, len(rows), best_sim
+                    return True, 1, best_sim, False
+            # 多候选(>1): 截断名无法唯一认定 → 交由 send_at 粘贴全称策略
+            return False, len(rows), best_sim, len(rows) > 1
         except Exception:
             logger.exception("识别@候选人失败")
-            return False, -1, 0.0
+            return False, -1, 0.0, False
 
     def _input_box_has_name(self, name: str) -> bool:
-        """True if the input box contains `name` (or most of it) after @ pick."""
+        """True if the input box contains `name` (or most of it) after @ pick.
+
+        v5.0.1: 归一化比较 —— 微信候选面板选人后插入的是**成员显示名**
+        ("Green Chennai"), 配置里的是群名片("Green_Chennai"), 下划线/空格/
+        大小写差异必须抹掉再比(旧版只去空格, "Green_Chennai" 永远验证失败,
+        导致唯一候选也不被认可、走粘贴降级)。
+        """
         try:
             shot = self._get_screenshot()
             pos = self.get_input_box_position()
@@ -1287,12 +1312,15 @@ class WeChat4xAdapter(WeChatAdapter):
             region = shot.crop((max(0, x - 250), max(0, y - 80),
                                 min(shot.width, x + 300), min(shot.height, y + 25)))
             texts = ocr_recognize(region)
-            joined = "".join(t.get("text", "") for t in texts).replace(" ", "")
-            n = name.replace(" ", "")
-            if n in joined:
+            joined = "".join(t.get("text", "") for t in texts)
+            n = _norm_id(name)
+            j = _norm_id(joined)
+            if not n:
+                return False
+            if n in j:
                 return True
             tail = n[-3:]
-            return bool(tail) and tail in joined
+            return bool(tail) and tail in j
         except Exception:
             return False
 
