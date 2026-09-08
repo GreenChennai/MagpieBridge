@@ -25,3 +25,4 @@ config.json
 *.log
 .DS_Store
 _wiki/
+tools/WPI/*.exe
