@@ -16,14 +16,15 @@
 
 PLUGIN = {
     "name": "hotfix_foreground",
-    "version": "1.4.1",
-    "description": "热修补丁: 置前备选链+前台就绪等待(ADR-0006), 供旧实例热加载",
+    "version": "1.7.5",
+    "description": "热修补丁v1.7.1-REPO(置前+@归一化+折叠展开+搜索框)",
     "author": "MagpieBridge",
     "events": [],
     "actions": [],
 }
 
 import logging
+import types as _types
 import time as _time
 
 logger = logging.getLogger("hotfix_foreground")
@@ -65,15 +66,13 @@ def _install() -> bool:
 
     try:
         from magpie.core import wechat_adapter_4x as adapter_mod
-        if not getattr(adapter_mod.WeChat4xAdapter, "_hotfix_search_applied", False):
-            _install_search_expand_patch(adapter_mod)
+        _install_search_box_patch(adapter_mod)
     except Exception as e:
         logger.warning("search_contact 补丁失败: %s", e)
 
     try:
         from magpie.core import wechat_adapter_4x as adapter_mod
-        if not getattr(adapter_mod.WeChat4xAdapter, "_hotfix_hasname_applied", False):
-            _install_hasname_patch(adapter_mod)
+        _install_hasname_patch(adapter_mod)
     except Exception as e:
         logger.warning("_input_box_has_name 补丁失败: %s", e)
 
@@ -111,8 +110,7 @@ def _install_hasname_patch(adapter_mod) -> None:
             return False
 
     adapter_mod.WeChat4xAdapter._input_box_has_name = has_name_v2
-    adapter_mod.WeChat4xAdapter._hotfix_hasname_applied = True
-    logger.info("_input_box_has_name 归一化验证已安装(WeChat4xAdapter)")
+    logger.info("_input_box_has_name 归一化验证已安装(动态版)")
 
 
 def _restore_title_match(adapter_mod) -> None:
@@ -132,6 +130,78 @@ def _restore_title_match(adapter_mod) -> None:
             logger.info("_title_matches 已恢复原始实现(子串兜底撤销)")
             return
     logger.warning("未能从闭包恢复 _title_matches(保持现状)")
+
+
+def _search_via_box_impl(self, name) -> bool:
+    """微信搜索框确定性定位(ADR-0008): 点搜索框→输入全名→唯一结果点击。"""
+    import time as _t
+    try:
+        from magpie.core import capture, ocr
+        r = self._window.get_window_rect()
+        if not r:
+            return False
+        img = capture.grab_screen_region(r[0], r[1], r[2], r[3])
+        if not img:
+            return False
+        box = None
+        for t in ocr.ocr_recognize(img):
+            txt = t.get("text") or ""
+            if "搜索" in txt and len(txt) <= 6:
+                xs = [q[0] for q in t["bbox"]]
+                ys = [q[1] for q in t["bbox"]]
+                box = (r[0] + int(max(xs)) + 18, r[1] + int(sum(ys) / len(ys)))
+                break
+        if not box:
+            logger.info("[热修] 搜索框未定位到")
+            return False
+        logger.info("[热修] 搜索框路径: 点击(%d,%d) 输入 %r", box[0], box[1], name)
+        self._human.click_at(*box)
+        _t.sleep(0.6)
+        self._human.type_text_natural(name)
+        _t.sleep(1.4)
+        img2 = capture.grab_screen_region(r[0], r[1], r[2], r[3])
+        if not img2:
+            return False
+        from magpie.core.ocr import scan_chat_list
+        region = img2.crop((0, 40, self._config.chat_list_x2 + 20, img2.height))
+        items = scan_chat_list(region, (0, 40, self._config.chat_list_x2 + 20, img2.height))
+        from magpie.core.ocr import find_contact_by_name
+        match = find_contact_by_name(items, name) if items else None
+        if not match:
+            logger.info("[热修] 搜索框结果中没有 %r", name)
+            self._human._send_unicode_char(0x1B)
+            _t.sleep(0.5)
+            return False
+        logger.info("[热修] 搜索框命中 '%s'（识别为 '%s'）", name, match.name)
+        sx, sy = self._to_screen(match.x_position, match.y_position)
+        self._human.click_at(sx, sy)
+        _t.sleep(1.2)
+        if self._chat_selected(name, b""):
+            logger.info("[热修] 搜索框路径成功切换到 %r", name)
+            return True
+        return False
+    except Exception:
+        logger.exception("[热修] 搜索框路径异常")
+        return False
+
+
+def _install_search_box_patch(adapter_mod) -> None:
+    """搜索框确定性定位(ADR-0008): orig(主列表+折叠展开)失败 → 搜索框 → 再试。"""
+    import time as _t
+
+    orig_prev = getattr(adapter_mod.WeChat4xAdapter, "search_contact")
+
+    def search_v3(self, name, *a, **k):
+        if orig_prev(self, name, *a, **k):
+            return True
+        logger.info("[热修] 主列表未找到 %r, 搜索框路径重试", name)
+        if _search_via_box_impl(self, name):
+            return True
+        return orig_prev(self, name, *a, **k)
+
+    adapter_mod.WeChat4xAdapter.search_contact = search_v3
+    adapter_mod.WeChat4xAdapter._hotfix_search_box_applied = True
+    logger.info("search_contact 搜索框路径已安装(v1.7)")
 
 
 def _install_search_expand_patch(adapter_mod) -> None:

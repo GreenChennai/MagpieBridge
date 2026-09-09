@@ -634,9 +634,14 @@ class WeChat4xAdapter(WeChatAdapter):
             else:
                 no_new_streak += 1
                 if no_new_streak >= 2:
-                    # 已滚到列表底部且连续两轮无新内容 → 主列表扫完仍未找到。
-                    # 常见根因（ADR-0007）: 目标群在**折叠的置顶聊天区**里,
-                    # 主列表不可见。展开后重扫一次; 展开按钮不存在（无置顶
+                    # ADR-0008: 主列表扫描对「折叠置顶/深层历史会话」不可靠
+                    # (现场: 目标群在折叠置顶区, 主列表怎么滚都没有)。确定性
+                    # 定位 = 微信搜索框: 点搜索框 → 输入全名 → 唯一结果点击。
+                    if self._search_via_box(name):
+                        audit("搜索联系人", name, 结果="搜索框命中", 滚动轮数=scroll_round + 1)
+                        self.set_pending_target(name)
+                        return True
+                    # 次选: 展开折叠置顶聊天后重扫一次; 展开按钮不存在（无置顶
                     # 折叠）则按原逻辑快速失败并告警。
                     if self._expand_folded_top_chats():
                         logger.info("已展开折叠置顶聊天, 重扫会话列表找 '%s'", name)
@@ -656,6 +661,68 @@ class WeChat4xAdapter(WeChatAdapter):
         audit("搜索联系人", name, 结果="未找到", 滚动轮数=25)
         self.clear_pending_target()
         return False
+
+    def _search_via_box(self, name: str) -> bool:
+        """通过微信搜索框确定性定位会话（ADR-0008）。
+
+        主列表扫描对折叠置顶/深层历史天然不可靠; 搜索框输入全名后, 结果列表
+        显示**完整群名**, target_guard 严格口径即可安全匹配。
+        流程: OCR 定位「搜索」框 → 点击 → 逐字输入全名 → 等 → OCR 结果列表
+        → find_contact_by_name(严格) → 唯一命中点击 → 标题复核。
+        """
+        try:
+            r = self._window.get_window_rect()
+            if not r:
+                return False
+            from . import capture
+            img = capture.grab_screen_region(r[0], r[1], r[2], r[3])
+            if not img:
+                return False
+            box = None
+            for t in ocr_recognize(img):
+                txt = t.get("text") or ""
+                if ("搜索" in txt or "搜素" in txt or "捜索" in txt) and len(txt) <= 8:
+                    xs = [p[0] for p in t["bbox"]]
+                    ys = [p[1] for p in t["bbox"]]
+                    # 点击搜索框文本右侧的输入区
+                    box = (r[0] + int(max(xs)) + 18, r[1] + int(sum(ys) / len(ys)))
+                    break
+            if not box:
+                logger.info("搜索框未定位到（OCR 无「搜索」文本）")
+                return False
+            logger.info("搜索框路径: 点击(%d,%d) 输入 %r", box[0], box[1], name)
+            self._human.click_at(*box)
+            time.sleep(0.6)
+            self._human.type_text_natural(name)
+            time.sleep(1.4)
+
+            # OCR 搜索结果（主列表区域即结果列表区域）
+            img2 = capture.grab_screen_region(r[0], r[1], r[2], r[3])
+            if not img2:
+                return False
+            region = img2.crop((0, 40, self._config.chat_list_x2 + 20, img2.height))
+            items = scan_chat_list(region, (0, 40, self._config.chat_list_x2 + 20, img2.height))
+            match = find_contact_by_name(items, name) if items else None
+            if not match:
+                logger.info("搜索框结果中没有 %r", name)
+                # 清搜索: 连按 Esc 返回主界面
+                user32.keybd_event(0x1B, 0, 0, 0)   # ESC down: 退出搜索界面
+                user32.keybd_event(0x1B, 0, 2, 0)   # ESC up
+                time.sleep(0.5)
+                return False
+            logger.info("搜索框命中 '%s'（识别为 '%s'，%d,%d）", name, match.name,
+                        match.x_position, match.y_position)
+            sx, sy = self._to_screen(match.x_position, match.y_position)
+            self._human.click_at(sx, sy)
+            time.sleep(1.2)
+            if self._chat_selected(name, b""):
+                logger.info("搜索框路径成功切换到 %r", name)
+                return True
+            logger.warning("搜索框点击后标题未确认(%r)", self._chat_title())
+            return False
+        except Exception:
+            logger.exception("搜索框路径异常")
+            return False
 
     def _expand_folded_top_chats(self) -> bool:
         """OCR 定位「折叠置顶聊天」按钮并点击展开（ADR-0007）。
