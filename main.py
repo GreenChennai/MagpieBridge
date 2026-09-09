@@ -1095,6 +1095,25 @@ async def main() -> None:
             except Exception:
                 pass
 
+    async def _risk_loop() -> None:
+        """微信风控巡检(ADR-0009 补): OCR 判定是否停在「重新登录」页,
+        命中即邮件告警(30 分钟冷却)+TUI 提示。60s 周期, 息屏态照常检测
+        (截图走屏幕 BitBlt, 背光关闭不影响像素)。"""
+        from magpie.core.alerter import get_alerter
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if not getattr(engine, "_initialized", False):
+                    continue
+                hit, detail = engine.adapter.is_on_relogin_page()
+                if not hit:
+                    continue
+                logger.error("检测到微信风控/重新登录页: %s", detail[:120])
+                bus.record_note("⚠ 微信触发风控, 请人工维护")
+                await get_alerter().notify_wechat_risk(detail)
+            except Exception:
+                logger.exception("风控检测循环异常")
+
     async def _session_loop() -> None:
         """Periodically keep the desktop session interactive (auto 开始挂起).
 
@@ -1120,6 +1139,7 @@ async def main() -> None:
     status_task = asyncio.create_task(_status_loop())
     console_task = asyncio.create_task(_console_loop())
     session_task = asyncio.create_task(_session_loop())
+    risk_task = asyncio.create_task(_risk_loop())
 
     # ---- run the Textual TUI, with auto-restart on crash + headless fallback ----
     # TUI 仅是渲染层，崩溃不应带走后台服务。旧版 conhost（Win10）快速拖拽窗口
@@ -1259,7 +1279,7 @@ async def main() -> None:
             await web_task
         except Exception:
             pass
-    for t in (status_task, console_task, session_task):
+    for t in (status_task, console_task, session_task, risk_task):
         try:
             t.cancel()
             await t

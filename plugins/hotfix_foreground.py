@@ -16,7 +16,7 @@
 
 PLUGIN = {
     "name": "hotfix_foreground",
-    "version": "1.7.5",
+    "version": "1.8.0",
     "description": "热修补丁v1.7.1-REPO(置前+@归一化+折叠展开+搜索框)",
     "author": "MagpieBridge",
     "events": [],

@@ -35,6 +35,7 @@ class EmailAlerter:
         self._lock = threading.Lock()
         # 冷却聚合状态（线程安全，因为发送可能发生在任意线程）
         self._last_sent_at: float = 0.0
+        self._risk_last_sent_at: float = 0.0   # 微信风控告警独立冷却(ADR-0009 补)
         self._pending_failures: int = 0
         self._last_notify_kind: str = ""
         self._last_notify_target: str = ""
@@ -90,6 +91,39 @@ class EmailAlerter:
             with self._lock:
                 if self._last_sent_at == now:
                     self._last_sent_at = 0.0
+        return ok
+
+    async def notify_wechat_risk(self, detail: str = "") -> bool:
+        """微信风控/重新登录页告警(ADR-0009 补)。
+
+        独立 30 分钟冷却(不与发送失败冷却互斥——两类事件)。邮件未配置时
+        仅打 ERROR 日志提醒人工检查。"""
+        if not self.is_configured():
+            logger.error("微信疑似触发风控(%s)! 邮件告警未配置, 请立即人工检查微信!",
+                         detail[:80])
+            return False
+        now = time.time()
+        with self._lock:
+            if now - self._risk_last_sent_at < 1800:
+                logger.info("风控告警冷却中(30分钟), 忽略重复检测: %s", detail[:60])
+                return False
+            self._risk_last_sent_at = now
+
+        cfg = self._config
+        subject = f"{cfg.subject_prefix or '[MagpieBridge]'} ⚠ 微信触发风控, 需人工维护"
+        body = (
+            "检测到微信弹出「为了你的账号安全，请重新登录」风控提示。\n"
+            f"OCR 命中内容: {detail[:150]}\n"
+            f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            "微信已被登出, 线索转发已中断。请尽快人工重新登录微信并检查积压线索。"
+        )
+        ok, err = await asyncio.to_thread(self._send_sync, subject, body)
+        if ok:
+            logger.warning("已发送微信风控告警邮件")
+        else:
+            logger.error("风控告警邮件发送失败: %s", err)
+            with self._lock:
+                self._risk_last_sent_at = 0.0   # 失败释放冷却, 下一轮重试
         return ok
 
     async def send_test(self) -> tuple[bool, str]:

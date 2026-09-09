@@ -699,6 +699,31 @@ class WeChat4xAdapter(WeChatAdapter):
         self.clear_pending_target()
         return False
 
+    # 微信风控/重新登录页的特征文本(ADR-0009 补): 命中 >=2 条才判定,
+    # 防聊天内容恰好提到某个词造成误报。
+    _RELOGIN_HINTS = ("账号安全", "重新登录", "切换账号", "仅传输文件")
+
+    def is_on_relogin_page(self) -> tuple[bool, str]:
+        """OCR 全窗判定微信是否停留在「账号安全/重新登录」风控页。
+
+        微信触发风控会把当前账号登出, 界面变成登录提示页 —— 此时一切
+        自动化全部失效, 必须人工重新登录。返回 (是否命中, OCR 摘要)。
+        """
+        try:
+            r = self._window.get_window_rect()
+            if not r:
+                return False, "no window"
+            from . import capture
+            img = capture.grab_screen_region(r[0], r[1], r[2], r[3])
+            if not img:
+                return False, "no screenshot"
+            joined = "".join(t.get("text", "") for t in ocr_recognize(img))
+            hits = sum(1 for k in self._RELOGIN_HINTS if k in joined)
+            return hits >= 2, joined[:150]
+        except Exception:
+            logger.exception("风控页检测异常")
+            return False, "error"
+
     def _search_via_box(self, name: str) -> bool:
         """通过微信搜索框确定性定位会话（ADR-0008）。
 
