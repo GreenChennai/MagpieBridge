@@ -847,7 +847,10 @@ async def _forward_task(engine, leads_data, saved_serials, group_name, member_na
             if not all_sent:
                 logger.error("[LeadsLinker] 本批存在未确认送达步骤，已写历史防整批重发；"
                              "请查收失败告警邮件/日志人工确认")
-            if _reply_handling_enabled():
+            # v3.0.3: 未发出的线索**不进入**待受理跟踪 —— 旧行为会让 TUI/日志
+            # 显示「跟踪待受理 -> @xx」(看起来像已发出等回复), 实际群里什么都没
+            # 有(用户报告的"显示发出去了实际没有")。未送达已有邮件告警, 待重试。
+            if all_sent and _reply_handling_enabled():
                 for i, lead in enumerate(leads_data):
                     serial = saved_serials[i] if i < len(saved_serials) else f"unknown_{i}"
                     pending_id = f"{serial}_{datetime.now().timestamp()}"

@@ -249,8 +249,29 @@
     return '未知';
   }
 
+  // 深度文本提取(2026-09-09): 来客页把昵称里的 emoji 渲染成 <img>,
+  // textContent 拿不到 → 纯 emoji 昵称(如 "😂")提取为空 → 退化为"客户0649"。
+  // IMG 节点改取 alt/aria-label(平台会把 emoji 字符放 alt)。
+  function deepText(el) {
+    if (!el) return '';
+    var parts = [];
+    var walk = function (n) {
+      if (!n) return;
+      if (n.nodeType === 3) { parts.push(n.nodeValue || ''); return; }
+      if (n.nodeType !== 1) return;
+      if (n.tagName === 'IMG') {
+        var a = n.getAttribute('alt') || n.getAttribute('aria-label') || '';
+        if (a) parts.push(a);
+        return;
+      }
+      for (var i = 0; i < n.childNodes.length; i++) walk(n.childNodes[i]);
+    };
+    walk(el);
+    return parts.join('');
+  }
+
   function itemName(item) {
-    var n = sanitizeName(text(item.querySelector(SEL.convName)));
+    var n = sanitizeName(deepText(item.querySelector(SEL.convName)));
     if (n && !isTypingText(n)) return n;
     return '';
   }
@@ -302,7 +323,7 @@
   function windowTitle() {
     var els = document.querySelectorAll(SEL.msgTitle);
     for (var i = 0; i < els.length; i++) {
-      var t = text(els[i]);
+      var t = deepText(els[i]);
       if (t && t.length > 2) return t;
     }
     return '';

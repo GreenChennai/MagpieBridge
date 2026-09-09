@@ -224,9 +224,11 @@ class WeChat4xAdapter(WeChatAdapter):
         if not shot:
             return ""
         try:
-            # Wider region: from chat panel start (x≈340) to near the right icons (x≈780)
-            # Height covers the title bar area (y≈15 to y≈80)
-            texts = ocr_recognize(shot.crop((340, 15, 780, 80)))
+            # 标题区裁剪。左缘 336(聊天面板起点): RDP→控制台切换后字体渲染
+            # 会横向偏移 1-3px, 裁剪过贴会让首字(如「测」)只剩半个 → OCR 读成
+            # 「则」/漏字(ADR-0009, 用户实测「测试的佛山投流工作群」→
+            # 「则试的…/试的…」)。首次识别偏短时用左扩+2x 放大二次识别兜底。
+            texts = ocr_recognize(shot.crop((336, 12, 800, 82)))
 
             # Keep only confident, non-empty, non-noise blocks; group into
             # visual rows (same y-top within 12px), mirroring core.ocr.scan_chat_list.
@@ -265,6 +267,41 @@ class WeChat4xAdapter(WeChatAdapter):
             # Top-most row = the chat title; merge its boxes left→right.
             top = sorted(rows[0], key=lambda t: min(p[0] for p in t["bbox"]))
             merged = _merge_name_blocks([(t.get("text") or "").strip() for t in top])
+
+            # 二次识别兜底: 首次结果过短(疑似首字被裁/渲染偏移)时, 左缘再扩
+            # 8px 并 2x 放大重 OCR, 取更长的合并结果(截断只会更短)。
+            if len(merged) < 6:
+                try:
+                    from PIL import Image as _Image
+                    crop2 = shot.crop((328, 8, 820, 90))
+                    crop2 = crop2.resize((crop2.width * 2, crop2.height * 2), _Image.LANCZOS)
+                    rows2: list[list[dict]] = []
+                    for t in sorted(
+                        ocr_recognize(crop2),
+                        key=lambda t: (min(p[1] for p in t["bbox"]), min(p[0] for p in t["bbox"])),
+                    ):
+                        text = (t.get("text") or "").strip()
+                        if not text or _is_noise_symbol(text):
+                            continue
+                        try:
+                            if float(t.get("score", 0) or 0) < 0.30:
+                                continue
+                        except (TypeError, ValueError):
+                            pass
+                        y_top = min(p[1] for p in t["bbox"])
+                        if rows2 and abs(y_top - rows2[-1][0]["y_top"]) <= 24:
+                            rows2[-1].append(t)
+                        else:
+                            t["y_top"] = y_top
+                            rows2.append([t])
+                    if rows2:
+                        top2 = sorted(rows2[0], key=lambda t: min(p[0] for p in t["bbox"]))
+                        merged2 = _merge_name_blocks([(t.get("text") or "").strip() for t in top2]).strip()
+                        if len(merged2) > len(merged):
+                            logger.info("标题二次识别(左扩+2x)取更优: %r -> %r", merged, merged2)
+                            merged = merged2
+                except Exception:
+                    logger.debug("标题二次识别失败", exc_info=True)
             return merged.strip()
         except Exception:
             logger.exception("读取聊天标题失败")
