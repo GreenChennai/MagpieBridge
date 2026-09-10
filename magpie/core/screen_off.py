@@ -159,9 +159,27 @@ def _is_off() -> bool:
         return _screen_off
 
 
+def _swallow_enabled() -> bool:
+    """吞输入开关: 仅在本机控制台会话时吞物理输入; 用户重连远程桌面
+    (RDP-Tcp#*)后键鼠必须立即可用 —— 自动亮屏+停吞由巡检负责,
+    这里读全局开关避免每个输入事件都做 WTS 查询。"""
+    return _swallow_enabled_flag
+
+
+_swallow_enabled_flag = True
+
+
+def set_swallow_enabled(enabled: bool, reason: str = "") -> None:
+    """巡检设置吞输入开关(ADR-0010)。关闭时物理键鼠放行。"""
+    global _swallow_enabled_flag
+    _swallow_enabled_flag = enabled
+    if not enabled:
+        logger.info("吞输入已暂停(%s)——远程会话中键鼠放行", reason)
+
+
 def _kbd_proc(nCode, wParam, lparam):  # noqa: N802 - Win32 回调
     try:
-        if nCode == 0 and _is_off():
+        if nCode == 0 and _is_off() and _swallow_enabled():
             info = lparam[0]
             injected = bool(info.flags & LLKHF_INJECTED)
             if not injected:
@@ -182,7 +200,7 @@ def _kbd_proc(nCode, wParam, lparam):  # noqa: N802 - Win32 回调
 
 def _mouse_proc(nCode, wParam, lparam):  # noqa: N802 - Win32 回调
     try:
-        if nCode == 0 and _is_off():
+        if nCode == 0 and _is_off() and _swallow_enabled():
             info = lparam[0]
             if not (info.flags & LLKHF_INJECTED):
                 return 1  # 吞掉一切物理鼠标输入（含移动），防误碰唤醒/误点
@@ -271,17 +289,31 @@ def turn_off_display(mode: str = "monitor") -> bool:
     mode="monitor"（默认）：系统级息屏 + 保黑 + 物理输入吞没；
     mode="overlay"：全屏黑窗遮罩 fallback（不吞输入、不省电）。
     """
-    global _screen_off
+    global _screen_off, _swallow_enabled_flag
     with _lock:
         _screen_off = True
-    if mode == "overlay":
+    overlay = (mode == "overlay")
+    # 远程会话中手动息屏: 允许(用户明确按了快捷键), 但**不吞输入**,
+    # 否则用户重连远程桌面后键鼠全失灵(ADR-0010 事故②);
+    # 本机控制台挂回场景(7x24 挂机)照常吞输入, 机器完全交给宿主。
+    swallow = True
+    try:
+        from magpie.core.session_control import session_is_remote
+        if session_is_remote():
+            swallow = False
+            logger.info("当前为远程桌面会话, 本次息屏不启用输入吞没(用户键鼠放行)")
+    except Exception:
+        pass
+    _swallow_enabled_flag = swallow
+    if overlay:
         _black_window_start()
         logger.info("已息屏（遮罩模式：全屏黑窗）")
         return True
-    _install_hooks()
+    if swallow:
+        _install_hooks()
     _start_reblack()
     _monitor_power(POWER_OFF)
-    logger.info("已息屏（系统级：背光关闭、显示器在线、物理输入已吞没；ESC / Ctrl+Alt+O 唤醒）")
+    logger.info("已息屏（系统级：背光关闭、显示器在线、吞输入=%s；ESC / Ctrl+Alt+O 唤醒）", swallow)
     return True
 
 
@@ -309,6 +341,24 @@ def wake_display(reason: str = "") -> bool:
 
 def is_screen_off() -> bool:
     return _is_off()
+
+
+def update_for_session_state() -> None:
+    """巡检钩子(ADR-0010): 息屏中且会话被用户重连到远程桌面 → 自动亮屏。
+
+    用户重连 RDP = 要操作电脑, 息屏(和吞输入)立即退出; 本机 console 挂机
+    态不受影响。吞输入开关在 turn_off_display 时按会话类型决定, 此处随
+    wake 一起复位。
+    """
+    if not _is_off():
+        return
+    try:
+        from magpie.core.session_control import session_is_remote
+        if session_is_remote():
+            logger.info("检测到用户重连远程桌面, 自动亮屏退出息屏")
+            wake_display(reason="rdp-session")
+    except Exception:
+        pass
 
 
 def toggle() -> bool:

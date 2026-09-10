@@ -222,6 +222,30 @@ def _get_foreground() -> int:
         return 0
 
 
+def _session_station_name() -> str:
+    """当前会话的站名(ADR-0010): "Console"=本机控制台, "RDP-Tcp#N"=远程桌面。"""
+    try:
+        wtsapi = ctypes.windll.wtsapi32
+        sid = _current_session_id()
+        buf = ctypes.c_void_p()
+        size = wintypes.DWORD(0)
+        # WTSWinStationName = 6
+        if not wtsapi.WTSQuerySessionInformationW(None, sid, 6, ctypes.byref(buf), ctypes.byref(size)):
+            return ""
+        try:
+            return ctypes.cast(buf, ctypes.c_wchar_p).value or ""
+        finally:
+            wtsapi.WTSFreeMemory(buf.value)
+    except Exception:
+        return ""
+
+
+def session_is_remote() -> bool:
+    """True 当会话当前连接在远程桌面(RDP-Tcp#*)上。"""
+    name = _session_station_name()
+    return name.upper().startswith("RDP")
+
+
 def probe_desktop() -> dict:
     """一次桌面可交互性探针：会话状态 / 输入桌面 / 前台窗口。
 
@@ -241,6 +265,14 @@ def probe_desktop() -> dict:
 # 无前台态，说明人已经不在看远程桌面，可以挂回物理控制台自愈。
 NULL_FG_GRACE_SEC = 90.0
 _null_fg_since: float = 0.0
+
+# 自愈去抖(ADR-0010): 用户发起 RDP 连接时, console 会话迁移到 rdp-tcp 的
+# 几秒窗口内 state 短暂为 Disconnected —— 5s 巡检撞上就会 tscon 把用户刚建
+# 立的连接踢回控制台(「一访问就被踢」事故)。触发需**连续命中**该次数
+# (巡检 5s 周期 × 3 次 = 15s), 迁移窗口几秒即结束, 不会误触发;
+# 真正的断开(用户关闭客户端)是持续态, 只延迟 15s 自愈。
+_TRIP_STREAK_NEED = 3
+_trip_streak: int = 0
 
 
 def should_hang(
@@ -294,11 +326,12 @@ def ensure_session_active(force: bool = False) -> tuple[bool, str]:
     Returns:
         (ok, message)
     """
-    global _null_fg_since
+    global _null_fg_since, _trip_streak
 
     _apply_anti_lock()
 
     if force:
+        _trip_streak = 0
         ok, msg = hang_to_console()
         if ok:
             logger.info("会话保活（强制）：已挂回本机控制台（%s）", msg)
@@ -316,7 +349,26 @@ def ensure_session_active(force: bool = False) -> tuple[bool, str]:
         _null_fg_since, time.time(),
     )
     if not need:
+        _trip_streak = 0
         return True, "会话处于活动状态，无需挂起"
+
+    # 去抖: 触发条件需连续命中(15s)。用户发起 RDP 连接的迁移窗口只有几秒,
+    # 不会连续命中 → 不会被误踢; 真断开是持续态, 只延迟自愈。
+    _trip_streak += 1
+    if _trip_streak < _TRIP_STREAK_NEED:
+        logger.info("会话自愈去抖(%d/%d): %s", _trip_streak, _TRIP_STREAK_NEED, reason)
+        return True, f"疑似断开(去抖中 {_trip_streak}/{_TRIP_STREAK_NEED})"
+
+    _trip_streak = 0
+    # tscon 前最后复查一次(状态可能已被用户的连接迁移恢复)
+    p2 = probe_desktop()
+    need2, reason2 = should_hang(
+        p2["session_state"], p2["input_desktop"], p2["foreground"],
+        _null_fg_since, time.time(),
+    )
+    if not need2:
+        logger.info("会话自愈复查时桌面已恢复(%s), 取消挂回", reason2)
+        return True, "复查时桌面已恢复, 取消自愈"
 
     logger.info("会话自愈触发：%s", reason)
     ok, msg = hang_to_console()

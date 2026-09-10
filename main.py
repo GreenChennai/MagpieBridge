@@ -1135,6 +1135,15 @@ async def main() -> None:
                     logger.info("会话保活: %s", msg)
             except Exception:
                 logger.exception("会话保活循环异常")
+            # 息屏中用户重连远程桌面 → 自动亮屏退出息屏(ADR-0010)
+            try:
+                from magpie.core import screen_off as _so
+                _so.update_for_session_state()
+                # 吞输入开关随会话类型刷新(远程=放行键鼠)
+                from magpie.core.session_control import session_is_remote as _remote
+                _so.set_swallow_enabled(not _remote(), "session-type-refresh")
+            except Exception:
+                pass
 
     status_task = asyncio.create_task(_status_loop())
     console_task = asyncio.create_task(_console_loop())
