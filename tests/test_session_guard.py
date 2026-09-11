@@ -19,10 +19,13 @@ class TestShouldHang:
         ok, reason = should_hang(WTS_DISCONNECTED, True, 12345, 0.0, 1000.0)
         assert ok and "断开" in reason
 
-    def test_locked_desktop_hangs(self):
-        """输入桌面不可访问(锁屏)→ 挂回。"""
-        ok, reason = should_hang(WTS_ACTIVE, False, 0, 0.0, 1000.0)
-        assert ok and "锁屏" in reason
+    def test_locked_desktop_never_hangs(self):
+        """ADR-0010 追加: 输入桌面不可访问(锁屏/RDP 登录欢迎页)→ 不再触发
+        挂回 —— 旧条件把「正在登录」当「锁屏」执行 tscon, 把刚验证过的
+        会话踢回控制台(蓝色登录中没进去就被踢的事故); 锁屏态 tscon 本就
+        无法解锁, 该路径由发送告警+人工处理。"""
+        ok, _ = should_hang(WTS_ACTIVE, False, 0, 0.0, 1000.0)
+        assert not ok
 
     def test_null_foreground_within_grace_never_hangs(self):
         """无前台但在宽限期内(RDP 最小化过渡态)→ 不挂,防止误踢。"""

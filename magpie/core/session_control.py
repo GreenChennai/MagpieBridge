@@ -287,16 +287,19 @@ def should_hang(
 
     触发条件（满足其一）：
     1. 会话已断开（WTSDisconnected，典型 = 用户关闭了 RDP 客户端）；
-    2. 输入桌面不可访问（锁屏/安全桌面）；
-    3. 桌面无前台窗口**且持续超过宽限期**（RDP 最小化/过渡态，人已不看）。
+    2. 桌面无前台窗口**且持续超过宽限期**（RDP 最小化/过渡态，人已不看）。
+
+    v5.0.1(ADR-0010 追加)撤销旧条件「输入桌面不可访问（锁屏）」:
+    用户发起 RDP 连接时**登录欢迎界面(Winlogon)**期间输入桌面同样不可
+    访问, 旧条件把"正在登录"当成"锁屏"执行 tscon, 把刚验证过的会话踢回
+    控制台(「蓝色的登录中没进去就被踢」事故)。且锁屏态 tscon 本就无法
+    解锁, 该自愈从未有效——锁屏场景改为发送路径放弃+告警, 人工解锁。
 
     短暂的 foreground=0（< grace）绝不触发——绝把正在使用的用户踢下线。
     返回 (是否挂回, 原因说明)。
     """
     if session_state == WTS_DISCONNECTED:
         return True, "会话已断开（远程桌面已关闭）"
-    if not input_desktop_ok:
-        return True, "输入桌面不可访问（疑似锁屏）"
     if not foreground:
         waited = now - null_fg_since if null_fg_since else 0.0
         if null_fg_since and waited >= grace:
@@ -399,6 +402,14 @@ def ensure_sendable_session(timeout: float = 30.0) -> bool:
     """
     if not _is_session_disconnected() and _input_desktop_accessible():
         return True
+
+    # 会话 Active 但输入桌面不可访问 = 锁屏/登录欢迎页(Winlogon):
+    # tscon 挂回**无法解锁**, 反而会踢掉正在登录的用户(ADR-0010 事故)。
+    # 此时合成输入无效, 正确做法是放弃本次发送并告警, 由人工解锁。
+    if _input_desktop_accessible() is False and _session_state() != WTS_DISCONNECTED:
+        logger.warning("会话处于锁屏/登录页(state=Active, 输入桌面不可访问), "
+                       "tscon 无法解锁 —— 放弃本次发送, 请人工解锁后重试")
+        return False
 
     _apply_anti_lock()
     ok, msg = hang_to_console()
